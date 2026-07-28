@@ -14,7 +14,7 @@ def get_default_block_availability():
         [0, 1, 0, 1, 1, 1]   # Accelerated availability
     ]
 
-def get_default_labs_arrangement(no_of_blocks, no_of_labs):
+def get_default_labs_arrangement(no_of_blocks, no_of_labs, no_of_days):
     """
     Default lab arrangement pattern for each day and block.
     Returns: List of days, each containing list of blocks, each containing list of labs.
@@ -25,12 +25,13 @@ def get_default_labs_arrangement(no_of_blocks, no_of_labs):
         [[1, 1], [1, 1]],  # Wednesday
         [[0, 0], [1, 0]],  # Thursday
         [[1, 1], [1, 1]],  # Friday
-        [[1, 1], [1, 1]]   # Saturday
+        [[1, 1], [1, 1]],  # Saturday
+        [[1, 1], [1, 1]]   # Sunday
     ]
     
-    # Adapt to actual no_of_blocks and no_of_labs
     adapted_arrangement = []
-    for day_idx, day in enumerate(days_arrangement):
+    for day_idx in range(no_of_days):
+        day = days_arrangement[day_idx] if day_idx < len(days_arrangement) else days_arrangement[-1]
         day_blocks = []
         for block_idx in range(no_of_blocks):
             if block_idx < len(day):
@@ -96,7 +97,15 @@ def run_ortools_solver(params):
 
     block_availability = params["block_availability"]
     labs_arrangement = params["labs_arrangement"]
+    objective_choice = params.get("objective", "Balanced Schedule Distribution")
+    user_preference_weights = params.get("preference_weights")
 
+    if objective_choice == "Preference Weighted Scheduling" and user_preference_weights:
+        preference_list = list(user_preference_weights)
+        if len(preference_list) < no_of_weeks:
+            preference_list += [preference_list[-1]] * (no_of_weeks - len(preference_list))
+    else:
+        preference_list = [1] * no_of_weeks
 
     # ------------------------------------------------------------
     # Build Model
@@ -187,7 +196,11 @@ def run_ortools_solver(params):
                 for day in range(no_of_days):
                     for block in range(no_of_blocks):
                         for lab in range(no_of_labs):
-                            z_min.append(assign[(level, group, week, day, block, lab)] * block)
+                            var = assign[(level, group, week, day, block, lab)]
+                            if objective_choice == "Preference Weighted Scheduling":
+                                z_min.append(var * preference_list[week])
+                            else:
+                                z_min.append(var * block)
 
     model.Minimize(sum(z_min))
 
@@ -198,10 +211,10 @@ def run_ortools_solver(params):
     status = solver.solve(model)
 
     # ------------------------------------------------------------
-    # Build Markdown Output
+    # Build Markdown and structured schedule output
     # ------------------------------------------------------------
     markdown_output = ""
-
+    weekly_schedule = []
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
 
         for week in range(no_of_weeks):
@@ -213,9 +226,11 @@ def run_ortools_solver(params):
             separator_cells = ["-" * 23] + ["-" * 21] * (len(header_cells) - 1)
             markdown_output += "|" + "|".join(separator_cells) + "|\n"
 
+            week_rows = []
             for day in range(no_of_days):
 
-                row = f"| {days[day]:<21} |"
+                row = [days[day]]
+                markdown_row = f"| {days[day]:<21} |"
 
                 for block in range(no_of_blocks):
                     for lab in range(no_of_labs):
@@ -227,9 +242,17 @@ def run_ortools_solver(params):
                                 if solver.value(assign[(level, group, week, day, block, lab)]) == 1:
                                     assigned_text = f"{level_text[level]}-Group{group+1}"
 
-                        row += f"{assigned_text:<21} |"
+                        row.append(assigned_text)
+                        markdown_row += f"{assigned_text:<21} |"
 
-                markdown_output += row + "\n"
+                week_rows.append(row)
+                markdown_output += markdown_row + "\n"
+
+            weekly_schedule.append({
+                "week": week + 1,
+                "header": header_cells,
+                "rows": week_rows
+            })
 
     else:
         markdown_output = "No Solution Found"
@@ -241,5 +264,6 @@ def run_ortools_solver(params):
         "status": solver.status_name(status),
         "objective_value": solver.objective_value if status in (cp_model.OPTIMAL, cp_model.FEASIBLE) else None,
         "markdown_output": markdown_output,
+        "weekly_schedule": weekly_schedule,
         "daily_header_data": daily_header_data
     }
