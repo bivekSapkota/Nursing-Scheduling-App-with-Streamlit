@@ -3,6 +3,7 @@ import re
 import uuid
 from datetime import date, timedelta
 from html import escape
+from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -11,15 +12,22 @@ from io import BytesIO
 from solver import run_ortools_solver, get_default_block_availability, get_default_labs_arrangement
 
 
-def generate_sample_roster_df(senior_groups=2, junior_groups=2, accelerated_groups=2, students_per_group=8):
+def generate_sample_roster_df(
+    senior_groups=2,
+    junior_groups=2,
+    accelerated_groups=2,
+    students_per_group=8,
+    senior_course_names=None,
+    junior_course_names=None,
+):
     levels = ["Senior", "Junior", "Accelerated"]
     groups_by_level = {
         "Senior": [f"Group{i}" for i in range(1, senior_groups + 1)],
         "Junior": [f"Group{i}" for i in range(1, junior_groups + 1)],
         "Accelerated": [f"Group{i}" for i in range(1, accelerated_groups + 1)],
     }
-    senior_courses = ["412L", "422L", "442L"]
-    junior_courses = ["312L", "322L", "382L"]
+    senior_courses = senior_course_names or ["412L", "422L", "442L"]
+    junior_courses = junior_course_names or ["312L", "322L", "382L"]
     all_courses = senior_courses + junior_courses
 
     rows = []
@@ -142,12 +150,36 @@ with st.sidebar.expander("Sample CSV Generator"):
     junior_group_count = st.number_input("Junior groups", min_value=1, max_value=10, value=2)
     accelerated_group_count = st.number_input("Accelerated groups", min_value=1, max_value=10, value=2)
 
+    default_senior_courses = "412L, 422L, 442L"
+    default_junior_courses = "312L, 322L, 382L"
+    senior_course_names_input = st.text_input(
+        "Senior course names",
+        value=default_senior_courses,
+        help="Comma-separated senior course codes. Default: 412L, 422L, 442L",
+    )
+    junior_course_names_input = st.text_input(
+        "Junior course names",
+        value=default_junior_courses,
+        help="Comma-separated junior course codes. Default: 312L, 322L, 382L",
+    )
+
+    def parse_course_names(raw_text, fallback):
+        if raw_text is None or not str(raw_text).strip():
+            return fallback
+        parsed = [item.strip() for item in str(raw_text).split(",") if item.strip()]
+        return parsed if parsed else fallback
+
     if st.button("Generate & load sample roster"):
+        senior_course_names = parse_course_names(senior_course_names_input, ["412L", "422L", "442L"])
+        junior_course_names = parse_course_names(junior_course_names_input, ["312L", "322L", "382L"])
+
         sample_roster = generate_sample_roster_df(
             senior_groups=senior_group_count,
             junior_groups=junior_group_count,
             accelerated_groups=accelerated_group_count,
             students_per_group=student_group_size,
+            senior_course_names=senior_course_names,
+            junior_course_names=junior_course_names,
         )
         st.session_state["sample_roster_csv"] = sample_roster.to_csv(index=False)
         st.session_state["uploaded_roster_auto_loaded"] = sample_roster
@@ -164,7 +196,49 @@ with st.sidebar.expander("Sample CSV Generator"):
         st.caption("Preview of the generated roster:")
         st.dataframe(sample_roster_preview.head(10), use_container_width=True)
 
+def get_default_roster_file():
+    preferred_names = [
+        "Test Roaster.csv",
+        "Test Roster.csv",
+        "test roaster.csv",
+        "test roster.csv",
+    ]
+    candidate_dirs = [Path.cwd(), Path(__file__).resolve().parent]
+
+    for directory in candidate_dirs:
+        for name in preferred_names:
+            candidate = directory / name
+            if candidate.exists() and candidate.is_file():
+                return candidate
+
+    for directory in candidate_dirs:
+        csv_files = sorted(directory.glob("*.csv"))
+        for candidate in csv_files:
+            name_lower = candidate.name.lower()
+            if "test" in name_lower and ("roaster" in name_lower or "roster" in name_lower):
+                return candidate
+
+    for directory in candidate_dirs:
+        csv_files = sorted(directory.glob("*.csv"))
+        if csv_files:
+            return csv_files[0]
+
+    return None
+
+
+def load_default_roster_if_present():
+    default_roster_path = get_default_roster_file()
+    if default_roster_path is None:
+        return None
+    try:
+        return pd.read_csv(default_roster_path)
+    except Exception:
+        return None
+
+
 uploaded_roster = st.sidebar.file_uploader("Upload student/course roster CSV", type=["csv"])
+default_roster_df = load_default_roster_if_present()
+
 if uploaded_roster is not None:
     try:
         roster_df = load_roster_file(uploaded_roster)
@@ -177,6 +251,10 @@ if uploaded_roster is not None:
 elif "uploaded_roster_auto_loaded" in st.session_state:
     roster_df = st.session_state["uploaded_roster_auto_loaded"]
     st.sidebar.caption("Using the generated sample roster CSV.")
+elif default_roster_df is not None:
+    roster_df = default_roster_df
+    st.session_state["uploaded_roster_auto_loaded"] = roster_df
+    st.sidebar.caption("Using the default roster file: Test Roster.csv")
 else:
     roster_df = None
 
@@ -192,14 +270,14 @@ if roster_df is not None:
                     {course: default_course_requirements[level].get(course, 0) for course in course_columns}
                     for level in ["Senior", "Junior", "Accelerated"]
                 ],
-                index=["Senior", "Junior", "Accelerated"],
+                index=pd.Index(["Senior", "Junior", "Accelerated"], name="Level"),
                 columns=course_columns,
             )
 
         st.sidebar.markdown("### Expected Course Requirements")
         st.session_state.course_requirement_matrix = st.sidebar.data_editor(
             st.session_state.course_requirement_matrix,
-            hide_index=True,
+            hide_index=False,
             use_container_width=True,
             key="course_requirement_matrix_editor",
             disabled=False,
@@ -229,6 +307,7 @@ if "uploaded_roster_auto_loaded" in st.session_state and uploaded_roster is not 
     st.session_state.pop("uploaded_roster_auto_loaded", None)
 
 st.sidebar.markdown("### Block Availability (Allowed Days)")
+st.sidebar.caption("Define the actual days each level is allowed to attend lab. These are hard constraints enforced by the solver.")
 
 days_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 active_days = days_of_week[:no_of_days]
@@ -304,7 +383,7 @@ objective_choice = st.radio(
 preference_weights = None
 if objective_choice == "Preference Weighted Scheduling":
     st.markdown("### Weekly Preference Weights")
-    st.caption("Lower values mean higher scheduling preference for that week.")
+    st.caption("Higher values mean lower scheduling preference for that week.")
 
     default_preference = [1] * no_of_weeks
     weight_cols = st.columns(min(no_of_weeks, 6))

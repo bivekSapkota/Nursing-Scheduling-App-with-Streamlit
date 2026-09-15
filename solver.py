@@ -54,6 +54,20 @@ def _sort_key(value):
     return (1, text.lower())
 
 
+def _normalize_level_name(level_name):
+    text = str(level_name or "").strip()
+    aliases = {
+        "senior": "Senior",
+        "junior": "Junior",
+        "accelerated": "Accelerated",
+        "sr": "Senior",
+        "jr": "Junior",
+        "acc": "Accelerated",
+    }
+    key = text.lower()
+    return aliases.get(key, text)
+
+
 def _build_roster_from_csv(params):
     course_data = params.get("course_data") or []
     course_columns = params.get("course_columns") or []
@@ -68,7 +82,7 @@ def _build_roster_from_csv(params):
         level_value = None
         for candidate in ["Student_Level", "Level", "student_level", "level"]:
             if candidate in row and row[candidate] not in (None, ""):
-                level_value = str(row[candidate]).strip()
+                level_value = _normalize_level_name(row[candidate])
                 break
         if level_value is None:
             level_value = "0"
@@ -83,7 +97,15 @@ def _build_roster_from_csv(params):
 
         level_sets.setdefault(level_value, set()).add(group_value)
 
-    level_text = sorted(level_sets.keys(), key=_sort_key)
+    level_priority = {"Senior": 0, "Junior": 1, "Accelerated": 2}
+    ordered_levels = [
+        level_name for level_name in ["Senior", "Junior", "Accelerated"] if level_name in level_sets
+    ]
+    remaining_levels = [
+        level_name for level_name in sorted(level_sets.keys(), key=_sort_key)
+        if level_name not in ordered_levels
+    ]
+    level_text = ordered_levels + remaining_levels
     group_counts = []
     student_data = []
     for level_name in level_text:
@@ -96,7 +118,7 @@ def _build_roster_from_csv(params):
                 row_level = None
                 for candidate in ["Student_Level", "Level", "student_level", "level"]:
                     if candidate in row and row[candidate] not in (None, ""):
-                        row_level = str(row[candidate]).strip()
+                        row_level = _normalize_level_name(row[candidate])
                         break
                 if row_level is None:
                     row_level = "0"
@@ -157,6 +179,27 @@ def _solve_course_aware_model(params):
     student_data = roster["student_data"]
     no_of_groups_levelwise = roster["no_of_groups_levelwise"]
 
+    canonical_level_names = ["Senior", "Junior", "Accelerated"]
+    available_days_by_name = {}
+    for level_name in canonical_level_names:
+        level_index = canonical_level_names.index(level_name)
+        raw_days = block_availability[level_index] if level_index < len(block_availability) else [1] * no_of_days
+        available_days_by_name[level_name] = list(raw_days[:no_of_days])
+
+    for level_name in list(level_text):
+        canonical_name = _normalize_level_name(level_name)
+        if canonical_name in available_days_by_name:
+            available_days_by_name[canonical_name] = available_days_by_name[canonical_name]
+
+    allowed_days_by_level = {}
+    for level_name in level_text:
+        raw_days = available_days_by_name.get(level_name, [1] * no_of_days)
+        allowed_days = {
+            day_index for day_index, is_allowed in enumerate(raw_days[:no_of_days])
+            if _normalize_bool(is_allowed)
+        }
+        allowed_days_by_level[level_name] = allowed_days
+
     model = cp_model.CpModel()
     assign = {}
 
@@ -204,20 +247,29 @@ def _solve_course_aware_model(params):
                         model.Add(sum(daily_vars) <= 1)
 
     for level in range(no_of_level):
+        level_name = level_text[level]
+        allowed_days = allowed_days_by_level.get(level_name, set(range(no_of_days)))
         for group in range(no_of_groups_levelwise[level]):
             for course in range(len(courses)):
                 if student_data[level][group][course] != 1:
                     continue
+
+                forbidden_day_vars = []
+                forbidden_lab_vars = []
                 for week in range(no_of_weeks):
                     for day in range(no_of_days):
                         for block in range(no_of_blocks):
                             for lab in range(no_of_labs):
                                 key = (level, group, course, week, day, block, lab)
                                 if key in assign:
-                                    if block_availability[level][day] == 0:
-                                        model.Add(assign[key] == 0)
-                                    if labs_arrangement[day][block][lab] == 0:
-                                        model.Add(assign[key] == 0)
+                                    x = assign[key]
+                                    forbidden_day_vars.append(x * (1 - int(day in allowed_days)))
+                                    forbidden_lab_vars.append(x * (1 - int(labs_arrangement[day][block][lab])))
+
+                if forbidden_day_vars:
+                    model.Add(sum(forbidden_day_vars) == 0)
+                if forbidden_lab_vars:
+                    model.Add(sum(forbidden_lab_vars) == 0)
 
     for week in range(no_of_weeks):
         for day in range(no_of_days):
@@ -259,10 +311,15 @@ def _solve_course_aware_model(params):
                             for lab in range(no_of_labs):
                                 key = (level, group, course, week, day, block, lab)
                                 if key in assign:
-                                    weight = preference_list[week] if objective_choice == "Preference Weighted Scheduling" else 1
+                                    if objective_choice == "Preference Weighted Scheduling":
+                                        # use the weekly preference weight as the objective coefficient
+                                        weight = preference_list[week]
+                                    else:
+                                        # notebook logic for balanced distribution
+                                        weight = block
                                     objective_terms.append(assign[key] * weight)
 
-    model.Maximize(sum(objective_terms))
+    model.Minimize(sum(objective_terms))
 
     solver = cp_model.CpSolver()
     status = solver.solve(model)
