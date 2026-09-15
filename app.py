@@ -70,6 +70,23 @@ def load_roster_file(file_obj):
         raise
 
 
+def get_default_course_requirement_matrix(course_columns):
+    levels = ["Senior", "Junior", "Accelerated"]
+    default = {level: {course: 0 for course in course_columns} for level in levels}
+    for course in course_columns:
+        match = re.search(r"(\d+)", str(course))
+        course_num = int(match.group(1)) if match else None
+        if course_num is None:
+            continue
+        if course_num >= 400:
+            default["Senior"][course] = 1
+            default["Accelerated"][course] = 1
+        elif course_num >= 300:
+            default["Junior"][course] = 1
+            default["Accelerated"][course] = 1
+    return default
+
+
 # Initialize session state
 if "results" not in st.session_state:
     st.session_state.results = None
@@ -168,6 +185,26 @@ if roster_df is not None:
     course_columns = [col for col in roster_df.columns if col not in excluded_cols]
     if course_columns:
         st.sidebar.caption(f"Detected courses: {', '.join(course_columns)}")
+        default_course_requirements = get_default_course_requirement_matrix(course_columns)
+        if "course_requirement_matrix" not in st.session_state:
+            st.session_state.course_requirement_matrix = pd.DataFrame(
+                [
+                    {course: default_course_requirements[level].get(course, 0) for course in course_columns}
+                    for level in ["Senior", "Junior", "Accelerated"]
+                ],
+                index=["Senior", "Junior", "Accelerated"],
+                columns=course_columns,
+            )
+
+        st.sidebar.markdown("### Expected Course Requirements")
+        st.session_state.course_requirement_matrix = st.sidebar.data_editor(
+            st.session_state.course_requirement_matrix,
+            hide_index=True,
+            use_container_width=True,
+            key="course_requirement_matrix_editor",
+            disabled=False,
+        )
+
         course_sessions = []
         for course in course_columns:
             course_sessions.append(
@@ -303,6 +340,7 @@ params = {
     "course_data": roster_df.to_dict(orient="records") if roster_df is not None else None,
     "course_columns": course_columns,
     "course_sessions": course_sessions,
+    "course_requirements": st.session_state.get("course_requirement_matrix", pd.DataFrame()).to_dict(orient="index") if "course_requirement_matrix" in st.session_state else {},
 }
 
 # Detect if params have changed
@@ -567,6 +605,22 @@ if st.session_state.results is not None:
             "group": f"Group{group_number}",
         }
 
+    def normalize_flag(value):
+        if pd.isna(value):
+            return 0
+        if isinstance(value, str):
+            value = value.strip()
+            if value.lower() in {"true", "t", "yes", "y"}:
+                return 1
+            if value.lower() in {"false", "f", "no", "n"}:
+                return 0
+        if isinstance(value, bool):
+            return int(value)
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return 0
+
     def get_students_for_cell(cell_value):
         if roster_df is None or cell_value in (None, ""):
             return []
@@ -574,9 +628,17 @@ if st.session_state.results is not None:
         if assignment is None:
             return []
 
-        course_name = assignment["course"]
-        level_name = assignment["level"]
-        group_name = assignment["group"]
+        course_name = str(assignment["course"]).strip()
+        level_name = str(assignment["level"]).strip()
+        group_name = str(assignment["group"]).strip()
+
+        requirement_matrix = st.session_state.get("course_requirement_matrix")
+        expected_map = {}
+        if isinstance(requirement_matrix, pd.DataFrame) and not requirement_matrix.empty:
+            for index_name in requirement_matrix.index:
+                if str(index_name).strip() == level_name:
+                    expected_map = {str(k).strip(): v for k, v in requirement_matrix.loc[index_name].items()}
+                    break
 
         student_names = []
         for _, row in roster_df.iterrows():
@@ -584,16 +646,30 @@ if st.session_state.results is not None:
                 continue
             if str(row.get("Group", "")).strip() != group_name:
                 continue
-            try:
-                course_flag = row.get(course_name, 0)
-                if int(course_flag) == 1:
-                    student_name = row.get("Student_Name")
-                    if pd.notna(student_name):
-                        student_names.append(str(student_name).strip())
-            except (TypeError, ValueError):
-                continue
 
-        return sorted(set(student_names))
+            student_name = row.get("Student_Name")
+            if pd.isna(student_name):
+                continue
+            student_name = str(student_name).strip()
+
+            actual_flag = normalize_flag(row.get(course_name))
+            expected_flag = normalize_flag(expected_map.get(course_name, 0))
+
+            if actual_flag == 1 or expected_flag == 1:
+                student_names.append({
+                    "name": student_name,
+                    "mismatch": actual_flag == 0 and expected_flag == 1,
+                })
+
+        unique_students = {}
+        for student in student_names:
+            name = student["name"]
+            if name not in unique_students:
+                unique_students[name] = student
+            elif student["mismatch"] and not unique_students[name]["mismatch"]:
+                unique_students[name] = student
+
+        return [unique_students[name] for name in sorted(unique_students)]
 
     def build_schedule_grid_html(schedule, colors):
         if not schedule:
@@ -616,10 +692,10 @@ if st.session_state.results is not None:
 
             for row in week["rows"]:
                 html_parts.append("<tr>")
-                html_parts.append(f"<th style='border:1px solid #ddd; background:#fafafa; color:#111; padding:8px; text-align:left;'>{row[0]}</th>")
+                html_parts.append(f"<th style='border:1px solid #ddd; background:#fafafa; color:#111; padding:8px; text-align:left;'>{escape(str(row[0]))}</th>")
                 for cell in row[1:]:
                     if cell:
-                        color = colors.get(cell, "#64748b")
+                        color = colors.get(str(cell), "#64748b")
                         students = get_students_for_cell(cell)
                         student_data = json.dumps(students)
                         html_parts.append(
@@ -634,18 +710,16 @@ if st.session_state.results is not None:
         return "".join(html_parts)
 
     def render_schedule_with_tabs(schedule, colors):
-        if not schedule:
-            return
-
         schedule_html = build_schedule_grid_html(schedule, colors)
         if not schedule_html:
+            st.markdown(filtered_markdown_text)
             return
 
-        html_string = f"""
+        html_string = """
         <style>
-        * {{ box-sizing: border-box; }}
-        body {{ margin: 0; font-family: Arial, sans-serif; }}
-        .tab-strip {{
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: Arial, sans-serif; }
+        .tab-strip {
             display: flex;
             align-items: flex-end;
             gap: 6px;
@@ -653,8 +727,8 @@ if st.session_state.results is not None:
             border-bottom: 1px solid rgba(0,0,0,0.12);
             background: transparent;
             margin-bottom: 12px;
-        }}
-        .tab {{
+        }
+        .tab {
             position: relative;
             appearance: none;
             border: 1px solid rgba(0,0,0,0.12);
@@ -669,12 +743,12 @@ if st.session_state.results is not None:
             cursor: pointer;
             white-space: nowrap;
             height: 36px;
-        }}
-        .tab.active {{
+        }
+        .tab.active {
             background: #ffffff;
             box-shadow: inset 2px 0 0 #4f46e5;
-        }}
-        .tab-close {{
+        }
+        .tab-close {
             opacity: 0;
             margin-left: 8px;
             color: #4b5563;
@@ -682,28 +756,28 @@ if st.session_state.results is not None:
             padding: 0 2px;
             cursor: pointer;
             transition: opacity 0.15s ease;
-        }}
-        .tab:hover .tab-close {{
+        }
+        .tab:hover .tab-close {
             opacity: 1;
-        }}
-        .tab-panel {{ display: none; }}
-        .tab-panel.active {{ display: block; }}
-        .student-list {{
+        }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+        .student-list {
             background: #ffffff;
             border: 1px solid rgba(0,0,0,0.08);
             border-radius: 8px;
             padding: 12px 14px;
             margin-top: 8px;
             box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-        }}
-        .student-list ul {{
+        }
+        .student-list ul {
             margin: 0;
             padding-left: 18px;
-        }}
-        .student-list li {{
+        }
+        .student-list li {
             margin: 6px 0;
-        }}
-        .course-cell {{
+        }
+        .course-cell {
             all: unset;
             display: block;
             width: 100%;
@@ -715,7 +789,7 @@ if st.session_state.results is not None:
             color: #fff;
             font-weight: bold;
             font-size: 12px;
-        }}
+        }
         </style>
         <div id="schedule-tab-root">
             <div class="tab-strip" id="tab-strip">
@@ -727,73 +801,67 @@ if st.session_state.results is not None:
         const root = document.getElementById('schedule-tab-root');
         const tabStrip = document.getElementById('tab-strip');
         const mainTab = document.querySelector('[data-tab="main"]');
-
-        const closeTab = (tabId) => {{
+        const closeTab = (tabId) => {
             const tab = root.querySelector('[data-tab="' + tabId + '"]');
             const panel = root.querySelector('[data-panel="' + tabId + '"]');
             if (tab) tab.remove();
             if (panel) panel.remove();
-            if (root.querySelectorAll('.tab').length === 0) {{
+            if (root.querySelectorAll('.tab').length === 0) {
                 mainTab.classList.add('active');
                 const mainPanel = document.getElementById('tab-panel-main');
                 if (mainPanel) mainPanel.classList.add('active');
-            }}
-        }};
-
-        document.querySelectorAll('.course-cell').forEach((btn) => {{
-            btn.addEventListener('click', function () {{
+            }
+        };
+        document.querySelectorAll('.course-cell').forEach((btn) => {
+            btn.addEventListener('click', function () {
                 const course = this.dataset.course;
                 const students = JSON.parse(this.dataset.students || '[]');
                 const key = 'course-' + course.replace(/[^a-zA-Z0-9]/g, '-');
-                if (root.querySelector('[data-tab="' + key + '"]')) {{
+                if (root.querySelector('[data-tab="' + key + '"]')) {
                     root.querySelector('[data-tab="' + key + '"]').click();
                     return;
-                }}
-
+                }
                 const tabButton = document.createElement('button');
                 tabButton.className = 'tab';
                 tabButton.type = 'button';
                 tabButton.dataset.tab = key;
                 tabButton.innerHTML = course + '<span class="tab-close" aria-label="Close tab">×</span>';
-                tabButton.addEventListener('click', () => {{
+                tabButton.addEventListener('click', () => {
                     root.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
                     root.querySelectorAll('.tab-panel').forEach((panel) => panel.classList.remove('active'));
                     tabButton.classList.add('active');
                     const panel = root.querySelector('[data-panel="' + key + '"]');
                     if (panel) panel.classList.add('active');
-                }});
-                tabButton.querySelector('.tab-close').addEventListener('click', (event) => {{
+                });
+                tabButton.querySelector('.tab-close').addEventListener('click', (event) => {
                     event.stopPropagation();
                     closeTab(key);
-                    if (!root.querySelector('.tab.active')) {{
+                    if (!root.querySelector('.tab.active')) {
                         mainTab.classList.add('active');
                         document.getElementById('tab-panel-main').classList.add('active');
-                    }}
-                }});
+                    }
+                });
                 tabStrip.appendChild(tabButton);
-
                 const panel = document.createElement('div');
                 panel.className = 'tab-panel';
                 panel.dataset.panel = key;
-                const studentList = students.length ? '<ul>' + students.map((s) => '<li>' + s + '</li>').join('') + '</ul>' : '<p>No students are enrolled in this course.</p>';
+                const studentList = students.length ? '<ul>' + students.map((s) => '<li style="color:' + (s.mismatch ? 'red' : '#1f2937') + ';">' + s.name + '</li>').join('') + '</ul>' : '<p>No students are enrolled in this course.</p>';
                 panel.innerHTML = '<div class="student-list"><h4>' + course + '</h4>' + studentList + '</div>';
                 root.appendChild(panel);
-
                 root.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
                 root.querySelectorAll('.tab-panel').forEach((p) => p.classList.remove('active'));
                 tabButton.classList.add('active');
                 panel.classList.add('active');
-            }});
-        }});
-
-        mainTab.addEventListener('click', () => {{
+            });
+        });
+        mainTab.addEventListener('click', () => {
             root.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
             root.querySelectorAll('.tab-panel').forEach((panel) => panel.classList.remove('active'));
             mainTab.classList.add('active');
             document.getElementById('tab-panel-main').classList.add('active');
-        }});
+        });
         </script>
-        """
+        """.replace("{schedule_html}", schedule_html)
 
         components.html(html_string, height=1200, scrolling=True)
 
