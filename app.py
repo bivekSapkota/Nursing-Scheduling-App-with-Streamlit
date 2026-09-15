@@ -1,7 +1,10 @@
+import json
 import re
 import uuid
 from datetime import date, timedelta
+from html import escape
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import openpyxl
 from io import BytesIO
@@ -617,8 +620,10 @@ if st.session_state.results is not None:
                 for cell in row[1:]:
                     if cell:
                         color = colors.get(cell, "#64748b")
+                        students = get_students_for_cell(cell)
+                        student_data = json.dumps(students)
                         html_parts.append(
-                            f"<td style='border:1px solid #ddd; background:{color}; color:#fff; padding:8px; text-align:center; font-weight:bold; vertical-align:middle; min-height:52px; white-space:normal;'>{cell}</td>"
+                            f"<td style='border:1px solid #ddd; background:{color}; color:#fff; padding:8px; text-align:center; font-weight:bold; vertical-align:middle; min-height:52px; white-space:normal;'><button class='course-cell' data-course='{escape(str(cell), quote=True)}' data-students='{escape(student_data, quote=True)}' type='button' style='all:unset; display:block; width:100%; height:100%; min-height:52px; cursor:pointer; color:#fff; font-weight:bold; text-align:center; background:transparent; padding:0;'> {escape(str(cell))} </button></td>"
                         )
                     else:
                         html_parts.append("<td style='border:1px solid #ddd; background:#ffffff; padding:8px; text-align:center; min-height:52px;'></td>")
@@ -628,13 +633,174 @@ if st.session_state.results is not None:
         html_parts.append("</div>")
         return "".join(html_parts)
 
+    def render_schedule_with_tabs(schedule, colors):
+        if not schedule:
+            return
+
+        schedule_html = build_schedule_grid_html(schedule, colors)
+        if not schedule_html:
+            return
+
+        html_string = f"""
+        <style>
+        * {{ box-sizing: border-box; }}
+        body {{ margin: 0; font-family: Arial, sans-serif; }}
+        .tab-strip {{
+            display: flex;
+            align-items: flex-end;
+            gap: 6px;
+            padding: 8px 8px 0 8px;
+            border-bottom: 1px solid rgba(0,0,0,0.12);
+            background: transparent;
+            margin-bottom: 12px;
+        }}
+        .tab {{
+            position: relative;
+            appearance: none;
+            border: 1px solid rgba(0,0,0,0.12);
+            border-bottom: none;
+            background: #f3f4f6;
+            color: #1f2937;
+            padding: 8px 14px 8px 14px;
+            border-radius: 8px 8px 0 0;
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1.2;
+            cursor: pointer;
+            white-space: nowrap;
+            height: 36px;
+        }}
+        .tab.active {{
+            background: #ffffff;
+            box-shadow: inset 2px 0 0 #4f46e5;
+        }}
+        .tab-close {{
+            opacity: 0;
+            margin-left: 8px;
+            color: #4b5563;
+            font-weight: 700;
+            padding: 0 2px;
+            cursor: pointer;
+            transition: opacity 0.15s ease;
+        }}
+        .tab:hover .tab-close {{
+            opacity: 1;
+        }}
+        .tab-panel {{ display: none; }}
+        .tab-panel.active {{ display: block; }}
+        .student-list {{
+            background: #ffffff;
+            border: 1px solid rgba(0,0,0,0.08);
+            border-radius: 8px;
+            padding: 12px 14px;
+            margin-top: 8px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+        }}
+        .student-list ul {{
+            margin: 0;
+            padding-left: 18px;
+        }}
+        .student-list li {{
+            margin: 6px 0;
+        }}
+        .course-cell {{
+            all: unset;
+            display: block;
+            width: 100%;
+            height: 100%;
+            min-height: 52px;
+            line-height: 52px;
+            text-align: center;
+            cursor: pointer;
+            color: #fff;
+            font-weight: bold;
+            font-size: 12px;
+        }}
+        </style>
+        <div id="schedule-tab-root">
+            <div class="tab-strip" id="tab-strip">
+                <button class="tab active" type="button" data-tab="main">Weekly Schedule <span aria-hidden="true"></span></button>
+            </div>
+            <div class="tab-panel active" id="tab-panel-main">{schedule_html}</div>
+        </div>
+        <script>
+        const root = document.getElementById('schedule-tab-root');
+        const tabStrip = document.getElementById('tab-strip');
+        const mainTab = document.querySelector('[data-tab="main"]');
+
+        const closeTab = (tabId) => {{
+            const tab = root.querySelector('[data-tab="' + tabId + '"]');
+            const panel = root.querySelector('[data-panel="' + tabId + '"]');
+            if (tab) tab.remove();
+            if (panel) panel.remove();
+            if (root.querySelectorAll('.tab').length === 0) {{
+                mainTab.classList.add('active');
+                const mainPanel = document.getElementById('tab-panel-main');
+                if (mainPanel) mainPanel.classList.add('active');
+            }}
+        }};
+
+        document.querySelectorAll('.course-cell').forEach((btn) => {{
+            btn.addEventListener('click', function () {{
+                const course = this.dataset.course;
+                const students = JSON.parse(this.dataset.students || '[]');
+                const key = 'course-' + course.replace(/[^a-zA-Z0-9]/g, '-');
+                if (root.querySelector('[data-tab="' + key + '"]')) {{
+                    root.querySelector('[data-tab="' + key + '"]').click();
+                    return;
+                }}
+
+                const tabButton = document.createElement('button');
+                tabButton.className = 'tab';
+                tabButton.type = 'button';
+                tabButton.dataset.tab = key;
+                tabButton.innerHTML = course + '<span class="tab-close" aria-label="Close tab">×</span>';
+                tabButton.addEventListener('click', () => {{
+                    root.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
+                    root.querySelectorAll('.tab-panel').forEach((panel) => panel.classList.remove('active'));
+                    tabButton.classList.add('active');
+                    const panel = root.querySelector('[data-panel="' + key + '"]');
+                    if (panel) panel.classList.add('active');
+                }});
+                tabButton.querySelector('.tab-close').addEventListener('click', (event) => {{
+                    event.stopPropagation();
+                    closeTab(key);
+                    if (!root.querySelector('.tab.active')) {{
+                        mainTab.classList.add('active');
+                        document.getElementById('tab-panel-main').classList.add('active');
+                    }}
+                }});
+                tabStrip.appendChild(tabButton);
+
+                const panel = document.createElement('div');
+                panel.className = 'tab-panel';
+                panel.dataset.panel = key;
+                const studentList = students.length ? '<ul>' + students.map((s) => '<li>' + s + '</li>').join('') + '</ul>' : '<p>No students are enrolled in this course.</p>';
+                panel.innerHTML = '<div class="student-list"><h4>' + course + '</h4>' + studentList + '</div>';
+                root.appendChild(panel);
+
+                root.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
+                root.querySelectorAll('.tab-panel').forEach((p) => p.classList.remove('active'));
+                tabButton.classList.add('active');
+                panel.classList.add('active');
+            }});
+        }});
+
+        mainTab.addEventListener('click', () => {{
+            root.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
+            root.querySelectorAll('.tab-panel').forEach((panel) => panel.classList.remove('active'));
+            mainTab.classList.add('active');
+            document.getElementById('tab-panel-main').classList.add('active');
+        }});
+        </script>
+        """
+
+        components.html(html_string, height=1200, scrolling=True)
+
     st.caption("Weekly schedule view.")
 
     if filtered_schedule_data:
-        st.markdown(
-            build_schedule_grid_html(filtered_schedule_data, group_colors),
-            unsafe_allow_html=True,
-        )
+        render_schedule_with_tabs(filtered_schedule_data, group_colors)
     else:
         st.markdown(filtered_markdown_text)
 
