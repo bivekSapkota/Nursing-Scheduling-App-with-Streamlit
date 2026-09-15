@@ -3,6 +3,7 @@ import re
 import uuid
 from datetime import date, timedelta
 from html import escape
+from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -11,15 +12,22 @@ from io import BytesIO
 from solver import run_ortools_solver, get_default_block_availability, get_default_labs_arrangement
 
 
-def generate_sample_roster_df(senior_groups=2, junior_groups=2, accelerated_groups=2, students_per_group=8):
+def generate_sample_roster_df(
+    senior_groups=2,
+    junior_groups=2,
+    accelerated_groups=2,
+    students_per_group=8,
+    senior_course_names=None,
+    junior_course_names=None,
+):
     levels = ["Senior", "Junior", "Accelerated"]
     groups_by_level = {
         "Senior": [f"Group{i}" for i in range(1, senior_groups + 1)],
         "Junior": [f"Group{i}" for i in range(1, junior_groups + 1)],
         "Accelerated": [f"Group{i}" for i in range(1, accelerated_groups + 1)],
     }
-    senior_courses = ["412L", "422L", "442L"]
-    junior_courses = ["312L", "322L", "382L"]
+    senior_courses = senior_course_names or ["412L", "422L", "442L"]
+    junior_courses = junior_course_names or ["312L", "322L", "382L"]
     all_courses = senior_courses + junior_courses
 
     rows = []
@@ -68,6 +76,23 @@ def load_roster_file(file_obj):
         if hasattr(file_obj, "seek"):
             file_obj.seek(0)
         raise
+
+
+def get_default_course_requirement_matrix(course_columns):
+    levels = ["Senior", "Junior", "Accelerated"]
+    default = {level: {course: 0 for course in course_columns} for level in levels}
+    for course in course_columns:
+        match = re.search(r"(\d+)", str(course))
+        course_num = int(match.group(1)) if match else None
+        if course_num is None:
+            continue
+        if course_num >= 400:
+            default["Senior"][course] = 1
+            default["Accelerated"][course] = 1
+        elif course_num >= 300:
+            default["Junior"][course] = 1
+            default["Accelerated"][course] = 1
+    return default
 
 
 # Initialize session state
@@ -125,12 +150,36 @@ with st.sidebar.expander("Sample CSV Generator"):
     junior_group_count = st.number_input("Junior groups", min_value=1, max_value=10, value=2)
     accelerated_group_count = st.number_input("Accelerated groups", min_value=1, max_value=10, value=2)
 
+    default_senior_courses = "412L, 422L, 442L"
+    default_junior_courses = "312L, 322L, 382L"
+    senior_course_names_input = st.text_input(
+        "Senior course names",
+        value=default_senior_courses,
+        help="Comma-separated senior course codes. Default: 412L, 422L, 442L",
+    )
+    junior_course_names_input = st.text_input(
+        "Junior course names",
+        value=default_junior_courses,
+        help="Comma-separated junior course codes. Default: 312L, 322L, 382L",
+    )
+
+    def parse_course_names(raw_text, fallback):
+        if raw_text is None or not str(raw_text).strip():
+            return fallback
+        parsed = [item.strip() for item in str(raw_text).split(",") if item.strip()]
+        return parsed if parsed else fallback
+
     if st.button("Generate & load sample roster"):
+        senior_course_names = parse_course_names(senior_course_names_input, ["412L", "422L", "442L"])
+        junior_course_names = parse_course_names(junior_course_names_input, ["312L", "322L", "382L"])
+
         sample_roster = generate_sample_roster_df(
             senior_groups=senior_group_count,
             junior_groups=junior_group_count,
             accelerated_groups=accelerated_group_count,
             students_per_group=student_group_size,
+            senior_course_names=senior_course_names,
+            junior_course_names=junior_course_names,
         )
         st.session_state["sample_roster_csv"] = sample_roster.to_csv(index=False)
         st.session_state["uploaded_roster_auto_loaded"] = sample_roster
@@ -147,7 +196,49 @@ with st.sidebar.expander("Sample CSV Generator"):
         st.caption("Preview of the generated roster:")
         st.dataframe(sample_roster_preview.head(10), use_container_width=True)
 
+def get_default_roster_file():
+    preferred_names = [
+        "Test Roaster.csv",
+        "Test Roster.csv",
+        "test roaster.csv",
+        "test roster.csv",
+    ]
+    candidate_dirs = [Path.cwd(), Path(__file__).resolve().parent]
+
+    for directory in candidate_dirs:
+        for name in preferred_names:
+            candidate = directory / name
+            if candidate.exists() and candidate.is_file():
+                return candidate
+
+    for directory in candidate_dirs:
+        csv_files = sorted(directory.glob("*.csv"))
+        for candidate in csv_files:
+            name_lower = candidate.name.lower()
+            if "test" in name_lower and ("roaster" in name_lower or "roster" in name_lower):
+                return candidate
+
+    for directory in candidate_dirs:
+        csv_files = sorted(directory.glob("*.csv"))
+        if csv_files:
+            return csv_files[0]
+
+    return None
+
+
+def load_default_roster_if_present():
+    default_roster_path = get_default_roster_file()
+    if default_roster_path is None:
+        return None
+    try:
+        return pd.read_csv(default_roster_path)
+    except Exception:
+        return None
+
+
 uploaded_roster = st.sidebar.file_uploader("Upload student/course roster CSV", type=["csv"])
+default_roster_df = load_default_roster_if_present()
+
 if uploaded_roster is not None:
     try:
         roster_df = load_roster_file(uploaded_roster)
@@ -160,6 +251,10 @@ if uploaded_roster is not None:
 elif "uploaded_roster_auto_loaded" in st.session_state:
     roster_df = st.session_state["uploaded_roster_auto_loaded"]
     st.sidebar.caption("Using the generated sample roster CSV.")
+elif default_roster_df is not None:
+    roster_df = default_roster_df
+    st.session_state["uploaded_roster_auto_loaded"] = roster_df
+    st.sidebar.caption("Using the default roster file: Test Roster.csv")
 else:
     roster_df = None
 
@@ -168,6 +263,26 @@ if roster_df is not None:
     course_columns = [col for col in roster_df.columns if col not in excluded_cols]
     if course_columns:
         st.sidebar.caption(f"Detected courses: {', '.join(course_columns)}")
+        default_course_requirements = get_default_course_requirement_matrix(course_columns)
+        if "course_requirement_matrix" not in st.session_state:
+            st.session_state.course_requirement_matrix = pd.DataFrame(
+                [
+                    {course: default_course_requirements[level].get(course, 0) for course in course_columns}
+                    for level in ["Senior", "Junior", "Accelerated"]
+                ],
+                index=pd.Index(["Senior", "Junior", "Accelerated"], name="Level"),
+                columns=course_columns,
+            )
+
+        st.sidebar.markdown("### Expected Course Requirements")
+        st.session_state.course_requirement_matrix = st.sidebar.data_editor(
+            st.session_state.course_requirement_matrix,
+            hide_index=False,
+            use_container_width=True,
+            key="course_requirement_matrix_editor",
+            disabled=False,
+        )
+
         course_sessions = []
         for course in course_columns:
             course_sessions.append(
@@ -192,6 +307,7 @@ if "uploaded_roster_auto_loaded" in st.session_state and uploaded_roster is not 
     st.session_state.pop("uploaded_roster_auto_loaded", None)
 
 st.sidebar.markdown("### Block Availability (Allowed Days)")
+st.sidebar.caption("Define the actual days each level is allowed to attend lab. These are hard constraints enforced by the solver.")
 
 days_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 active_days = days_of_week[:no_of_days]
@@ -267,7 +383,7 @@ objective_choice = st.radio(
 preference_weights = None
 if objective_choice == "Preference Weighted Scheduling":
     st.markdown("### Weekly Preference Weights")
-    st.caption("Lower values mean higher scheduling preference for that week.")
+    st.caption("Higher values mean lower scheduling preference for that week.")
 
     default_preference = [1] * no_of_weeks
     weight_cols = st.columns(min(no_of_weeks, 6))
@@ -303,6 +419,7 @@ params = {
     "course_data": roster_df.to_dict(orient="records") if roster_df is not None else None,
     "course_columns": course_columns,
     "course_sessions": course_sessions,
+    "course_requirements": st.session_state.get("course_requirement_matrix", pd.DataFrame()).to_dict(orient="index") if "course_requirement_matrix" in st.session_state else {},
 }
 
 # Detect if params have changed
@@ -567,6 +684,22 @@ if st.session_state.results is not None:
             "group": f"Group{group_number}",
         }
 
+    def normalize_flag(value):
+        if pd.isna(value):
+            return 0
+        if isinstance(value, str):
+            value = value.strip()
+            if value.lower() in {"true", "t", "yes", "y"}:
+                return 1
+            if value.lower() in {"false", "f", "no", "n"}:
+                return 0
+        if isinstance(value, bool):
+            return int(value)
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return 0
+
     def get_students_for_cell(cell_value):
         if roster_df is None or cell_value in (None, ""):
             return []
@@ -574,9 +707,17 @@ if st.session_state.results is not None:
         if assignment is None:
             return []
 
-        course_name = assignment["course"]
-        level_name = assignment["level"]
-        group_name = assignment["group"]
+        course_name = str(assignment["course"]).strip()
+        level_name = str(assignment["level"]).strip()
+        group_name = str(assignment["group"]).strip()
+
+        requirement_matrix = st.session_state.get("course_requirement_matrix")
+        expected_map = {}
+        if isinstance(requirement_matrix, pd.DataFrame) and not requirement_matrix.empty:
+            for index_name in requirement_matrix.index:
+                if str(index_name).strip() == level_name:
+                    expected_map = {str(k).strip(): v for k, v in requirement_matrix.loc[index_name].items()}
+                    break
 
         student_names = []
         for _, row in roster_df.iterrows():
@@ -584,16 +725,30 @@ if st.session_state.results is not None:
                 continue
             if str(row.get("Group", "")).strip() != group_name:
                 continue
-            try:
-                course_flag = row.get(course_name, 0)
-                if int(course_flag) == 1:
-                    student_name = row.get("Student_Name")
-                    if pd.notna(student_name):
-                        student_names.append(str(student_name).strip())
-            except (TypeError, ValueError):
-                continue
 
-        return sorted(set(student_names))
+            student_name = row.get("Student_Name")
+            if pd.isna(student_name):
+                continue
+            student_name = str(student_name).strip()
+
+            actual_flag = normalize_flag(row.get(course_name))
+            expected_flag = normalize_flag(expected_map.get(course_name, 0))
+
+            if actual_flag == 1 or expected_flag == 1:
+                student_names.append({
+                    "name": student_name,
+                    "mismatch": actual_flag == 0 and expected_flag == 1,
+                })
+
+        unique_students = {}
+        for student in student_names:
+            name = student["name"]
+            if name not in unique_students:
+                unique_students[name] = student
+            elif student["mismatch"] and not unique_students[name]["mismatch"]:
+                unique_students[name] = student
+
+        return [unique_students[name] for name in sorted(unique_students)]
 
     def build_schedule_grid_html(schedule, colors):
         if not schedule:
@@ -616,10 +771,10 @@ if st.session_state.results is not None:
 
             for row in week["rows"]:
                 html_parts.append("<tr>")
-                html_parts.append(f"<th style='border:1px solid #ddd; background:#fafafa; color:#111; padding:8px; text-align:left;'>{row[0]}</th>")
+                html_parts.append(f"<th style='border:1px solid #ddd; background:#fafafa; color:#111; padding:8px; text-align:left;'>{escape(str(row[0]))}</th>")
                 for cell in row[1:]:
                     if cell:
-                        color = colors.get(cell, "#64748b")
+                        color = colors.get(str(cell), "#64748b")
                         students = get_students_for_cell(cell)
                         student_data = json.dumps(students)
                         html_parts.append(
@@ -634,18 +789,16 @@ if st.session_state.results is not None:
         return "".join(html_parts)
 
     def render_schedule_with_tabs(schedule, colors):
-        if not schedule:
-            return
-
         schedule_html = build_schedule_grid_html(schedule, colors)
         if not schedule_html:
+            st.markdown(filtered_markdown_text)
             return
 
-        html_string = f"""
+        html_string = """
         <style>
-        * {{ box-sizing: border-box; }}
-        body {{ margin: 0; font-family: Arial, sans-serif; }}
-        .tab-strip {{
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: Arial, sans-serif; }
+        .tab-strip {
             display: flex;
             align-items: flex-end;
             gap: 6px;
@@ -653,8 +806,8 @@ if st.session_state.results is not None:
             border-bottom: 1px solid rgba(0,0,0,0.12);
             background: transparent;
             margin-bottom: 12px;
-        }}
-        .tab {{
+        }
+        .tab {
             position: relative;
             appearance: none;
             border: 1px solid rgba(0,0,0,0.12);
@@ -669,12 +822,12 @@ if st.session_state.results is not None:
             cursor: pointer;
             white-space: nowrap;
             height: 36px;
-        }}
-        .tab.active {{
+        }
+        .tab.active {
             background: #ffffff;
             box-shadow: inset 2px 0 0 #4f46e5;
-        }}
-        .tab-close {{
+        }
+        .tab-close {
             opacity: 0;
             margin-left: 8px;
             color: #4b5563;
@@ -682,28 +835,28 @@ if st.session_state.results is not None:
             padding: 0 2px;
             cursor: pointer;
             transition: opacity 0.15s ease;
-        }}
-        .tab:hover .tab-close {{
+        }
+        .tab:hover .tab-close {
             opacity: 1;
-        }}
-        .tab-panel {{ display: none; }}
-        .tab-panel.active {{ display: block; }}
-        .student-list {{
+        }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+        .student-list {
             background: #ffffff;
             border: 1px solid rgba(0,0,0,0.08);
             border-radius: 8px;
             padding: 12px 14px;
             margin-top: 8px;
             box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-        }}
-        .student-list ul {{
+        }
+        .student-list ul {
             margin: 0;
             padding-left: 18px;
-        }}
-        .student-list li {{
+        }
+        .student-list li {
             margin: 6px 0;
-        }}
-        .course-cell {{
+        }
+        .course-cell {
             all: unset;
             display: block;
             width: 100%;
@@ -715,7 +868,7 @@ if st.session_state.results is not None:
             color: #fff;
             font-weight: bold;
             font-size: 12px;
-        }}
+        }
         </style>
         <div id="schedule-tab-root">
             <div class="tab-strip" id="tab-strip">
@@ -727,73 +880,67 @@ if st.session_state.results is not None:
         const root = document.getElementById('schedule-tab-root');
         const tabStrip = document.getElementById('tab-strip');
         const mainTab = document.querySelector('[data-tab="main"]');
-
-        const closeTab = (tabId) => {{
+        const closeTab = (tabId) => {
             const tab = root.querySelector('[data-tab="' + tabId + '"]');
             const panel = root.querySelector('[data-panel="' + tabId + '"]');
             if (tab) tab.remove();
             if (panel) panel.remove();
-            if (root.querySelectorAll('.tab').length === 0) {{
+            if (root.querySelectorAll('.tab').length === 0) {
                 mainTab.classList.add('active');
                 const mainPanel = document.getElementById('tab-panel-main');
                 if (mainPanel) mainPanel.classList.add('active');
-            }}
-        }};
-
-        document.querySelectorAll('.course-cell').forEach((btn) => {{
-            btn.addEventListener('click', function () {{
+            }
+        };
+        document.querySelectorAll('.course-cell').forEach((btn) => {
+            btn.addEventListener('click', function () {
                 const course = this.dataset.course;
                 const students = JSON.parse(this.dataset.students || '[]');
                 const key = 'course-' + course.replace(/[^a-zA-Z0-9]/g, '-');
-                if (root.querySelector('[data-tab="' + key + '"]')) {{
+                if (root.querySelector('[data-tab="' + key + '"]')) {
                     root.querySelector('[data-tab="' + key + '"]').click();
                     return;
-                }}
-
+                }
                 const tabButton = document.createElement('button');
                 tabButton.className = 'tab';
                 tabButton.type = 'button';
                 tabButton.dataset.tab = key;
                 tabButton.innerHTML = course + '<span class="tab-close" aria-label="Close tab">×</span>';
-                tabButton.addEventListener('click', () => {{
+                tabButton.addEventListener('click', () => {
                     root.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
                     root.querySelectorAll('.tab-panel').forEach((panel) => panel.classList.remove('active'));
                     tabButton.classList.add('active');
                     const panel = root.querySelector('[data-panel="' + key + '"]');
                     if (panel) panel.classList.add('active');
-                }});
-                tabButton.querySelector('.tab-close').addEventListener('click', (event) => {{
+                });
+                tabButton.querySelector('.tab-close').addEventListener('click', (event) => {
                     event.stopPropagation();
                     closeTab(key);
-                    if (!root.querySelector('.tab.active')) {{
+                    if (!root.querySelector('.tab.active')) {
                         mainTab.classList.add('active');
                         document.getElementById('tab-panel-main').classList.add('active');
-                    }}
-                }});
+                    }
+                });
                 tabStrip.appendChild(tabButton);
-
                 const panel = document.createElement('div');
                 panel.className = 'tab-panel';
                 panel.dataset.panel = key;
-                const studentList = students.length ? '<ul>' + students.map((s) => '<li>' + s + '</li>').join('') + '</ul>' : '<p>No students are enrolled in this course.</p>';
+                const studentList = students.length ? '<ul>' + students.map((s) => '<li style="color:' + (s.mismatch ? 'red' : '#1f2937') + ';">' + s.name + '</li>').join('') + '</ul>' : '<p>No students are enrolled in this course.</p>';
                 panel.innerHTML = '<div class="student-list"><h4>' + course + '</h4>' + studentList + '</div>';
                 root.appendChild(panel);
-
                 root.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
                 root.querySelectorAll('.tab-panel').forEach((p) => p.classList.remove('active'));
                 tabButton.classList.add('active');
                 panel.classList.add('active');
-            }});
-        }});
-
-        mainTab.addEventListener('click', () => {{
+            });
+        });
+        mainTab.addEventListener('click', () => {
             root.querySelectorAll('.tab').forEach((tab) => tab.classList.remove('active'));
             root.querySelectorAll('.tab-panel').forEach((panel) => panel.classList.remove('active'));
             mainTab.classList.add('active');
             document.getElementById('tab-panel-main').classList.add('active');
-        }});
+        });
         </script>
-        """
+        """.replace("{schedule_html}", schedule_html)
 
         components.html(html_string, height=1200, scrolling=True)
 
