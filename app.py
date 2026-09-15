@@ -1,8 +1,71 @@
+import re
+import uuid
+from datetime import date, timedelta
 import streamlit as st
 import pandas as pd
 import openpyxl
 from io import BytesIO
 from solver import run_ortools_solver, get_default_block_availability, get_default_labs_arrangement
+
+
+def generate_sample_roster_df(senior_groups=2, junior_groups=2, accelerated_groups=2, students_per_group=8):
+    levels = ["Senior", "Junior", "Accelerated"]
+    groups_by_level = {
+        "Senior": [f"Group{i}" for i in range(1, senior_groups + 1)],
+        "Junior": [f"Group{i}" for i in range(1, junior_groups + 1)],
+        "Accelerated": [f"Group{i}" for i in range(1, accelerated_groups + 1)],
+    }
+    senior_courses = ["412L", "422L", "442L"]
+    junior_courses = ["312L", "322L", "382L"]
+    all_courses = senior_courses + junior_courses
+
+    rows = []
+    group_course_sets = {}
+
+    for level in levels:
+        if level == "Senior":
+            group_course_sets[level] = {group: senior_courses for group in groups_by_level[level]}
+        elif level == "Junior":
+            group_course_sets[level] = {group: junior_courses for group in groups_by_level[level]}
+        else:
+            group_course_sets[level] = {
+                group: senior_courses + junior_courses for group in groups_by_level[level]
+            }
+
+    for level in levels:
+        for group in groups_by_level[level]:
+            course_set = group_course_sets[level][group]
+            for idx in range(students_per_group):
+                student_name = f"{level}-{group}-Student{idx + 1}"
+                row = {
+                    "Student_Name": student_name,
+                    "Student_Level": level,
+                    "Group": group,
+                }
+                for course in all_courses:
+                    row[course] = 1 if course in course_set else 0
+                rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def load_roster_file(file_obj):
+    if file_obj is None:
+        return None
+    try:
+        if hasattr(file_obj, "seek"):
+            file_obj.seek(0)
+        content = file_obj.read()
+        if not content or content.strip() == b"":
+            return None
+        if hasattr(file_obj, "seek"):
+            file_obj.seek(0)
+        return pd.read_csv(BytesIO(content))
+    except Exception:
+        if hasattr(file_obj, "seek"):
+            file_obj.seek(0)
+        raise
+
 
 # Initialize session state
 if "results" not in st.session_state:
@@ -11,6 +74,8 @@ if "previous_params" not in st.session_state:
     st.session_state.previous_params = None
 if "params_changed" not in st.session_state:
     st.session_state.params_changed = False
+if "selected_schedule_cells" not in st.session_state:
+    st.session_state.selected_schedule_cells = []
 
 # 2. Streamlit App UI
 
@@ -23,27 +88,105 @@ st.markdown("Contributors: Dr. Leonardo Bedoya- Valencia, Dr. Ebisa Wollega, Ami
 # Sidebar Inputs
 st.sidebar.header("Model Parameters")
 
+st.sidebar.caption("All scheduling inputs are derived from the uploaded CSV roster.")
+week_start_date = st.sidebar.date_input(
+    "Week starts from",
+    value=date.today(),
+    min_value=date(2020, 1, 1),
+    max_value=date(2100, 12, 31),
+    help="Choose the actual calendar date that the first week begins on."
+)
 no_of_weeks = st.sidebar.number_input("Number of Weeks", min_value=1, max_value=52, value=16)
 no_of_days = st.sidebar.number_input("Number of Days per Week", min_value=1, max_value=7, value=6)
 no_of_blocks = st.sidebar.slider("Blocks per Day", min_value=1, max_value=5, value=2)
 no_of_labs = st.sidebar.slider("Labs per Block", min_value=1, max_value=5, value=2)
 
-st.sidebar.markdown("<hr style='border-top:3px solid green;margin:10px 0;'>", unsafe_allow_html=True)
 
-st.sidebar.subheader("Level Settings")
+def format_week_date_range(start_date, day_count):
+    end_date = start_date + timedelta(days=day_count - 1)
+    if start_date.month == end_date.month:
+        return f"{start_date.strftime('%b')} {start_date.day}–{end_date.day}"
+    return f"{start_date.strftime('%b')} {start_date.day}–{end_date.strftime('%b')} {end_date.day}"
 
-senior_groups = st.sidebar.number_input("No. of Senior Groups", min_value=1, max_value=50, value=15)
-junior_groups = st.sidebar.number_input("No. of Junior Groups", min_value=1, max_value=50, value=12)
-accelerated_groups = st.sidebar.number_input("No. of Accelerated Groups", min_value=1, max_value=50, value=15)
 
-st.sidebar.markdown("<hr style='border-top:3px solid green;margin:10px 0;'>", unsafe_allow_html=True)
-st.sidebar.subheader("Session Settings")
-
-senior_sessions = st.sidebar.number_input("No. of Senior Lab Sessions", min_value=1, max_value=20, value=4)
-junior_sessions = st.sidebar.number_input("No. of Junior Lab Sessions", min_value=1, max_value=20, value=4)
-accelerated_sessions = st.sidebar.number_input("No. of Accelerated Lab Sessions", min_value=1, max_value=20, value=7)
+def get_week_label(week_index, day_count, start_date):
+    week_start = start_date + timedelta(weeks=week_index)
+    date_range = format_week_date_range(week_start, day_count)
+    return f"Week {week_index + 1} ({date_range})"
 
 st.sidebar.markdown("<hr style='border-top:3px solid green;margin:10px 0;'>", unsafe_allow_html=True)
+
+with st.sidebar.expander("Sample CSV Generator"):
+    student_group_size = st.slider("Students per group", min_value=6, max_value=9, value=8, help="Each group in the generated roster will contain this many students.")
+    senior_group_count = st.number_input("Senior groups", min_value=1, max_value=10, value=2)
+    junior_group_count = st.number_input("Junior groups", min_value=1, max_value=10, value=2)
+    accelerated_group_count = st.number_input("Accelerated groups", min_value=1, max_value=10, value=2)
+
+    if st.button("Generate & load sample roster"):
+        sample_roster = generate_sample_roster_df(
+            senior_groups=senior_group_count,
+            junior_groups=junior_group_count,
+            accelerated_groups=accelerated_group_count,
+            students_per_group=student_group_size,
+        )
+        st.session_state["sample_roster_csv"] = sample_roster.to_csv(index=False)
+        st.session_state["uploaded_roster_auto_loaded"] = sample_roster
+        st.success("Sample roster created and loaded for use.")
+
+    if "sample_roster_csv" in st.session_state:
+        sample_roster_preview = pd.read_csv(BytesIO(st.session_state["sample_roster_csv"].encode("utf-8")))
+        st.download_button(
+            label="Download sample roster CSV",
+            data=st.session_state["sample_roster_csv"],
+            file_name="sample_roster.csv",
+            mime="text/csv",
+        )
+        st.caption("Preview of the generated roster:")
+        st.dataframe(sample_roster_preview.head(10), use_container_width=True)
+
+uploaded_roster = st.sidebar.file_uploader("Upload student/course roster CSV", type=["csv"])
+if uploaded_roster is not None:
+    try:
+        roster_df = load_roster_file(uploaded_roster)
+        if roster_df is None:
+            roster_df = None
+            st.sidebar.error("The uploaded CSV is empty. Please upload a valid roster file with column headers and student data.")
+    except pd.errors.EmptyDataError:
+        roster_df = None
+        st.sidebar.error("The uploaded CSV is empty. Please upload a valid roster file with column headers and student data.")
+elif "uploaded_roster_auto_loaded" in st.session_state:
+    roster_df = st.session_state["uploaded_roster_auto_loaded"]
+    st.sidebar.caption("Using the generated sample roster CSV.")
+else:
+    roster_df = None
+
+if roster_df is not None:
+    excluded_cols = {"Student_Name", "Name", "Student_Level", "Level", "Group_Index", "Group", "StudentID", "Student_ID"}
+    course_columns = [col for col in roster_df.columns if col not in excluded_cols]
+    if course_columns:
+        st.sidebar.caption(f"Detected courses: {', '.join(course_columns)}")
+        course_sessions = []
+        for course in course_columns:
+            course_sessions.append(
+                st.sidebar.number_input(
+                    f"{course} session count",
+                    min_value=1,
+                    max_value=20,
+                    value=1,
+                    key=f"course_session_{course}"
+                )
+            )
+    else:
+        course_columns = []
+        course_sessions = []
+        st.sidebar.warning("The selected roster file does not contain any course columns.")
+else:
+    course_columns = []
+    course_sessions = []
+    st.sidebar.warning("Upload a roster CSV to generate the level, group, course, and student schedule.")
+
+if "uploaded_roster_auto_loaded" in st.session_state and uploaded_roster is not None:
+    st.session_state.pop("uploaded_roster_auto_loaded", None)
 
 st.sidebar.markdown("### Block Availability (Allowed Days)")
 
@@ -144,16 +287,19 @@ params = {
     "no_of_days": no_of_days,
     "no_of_blocks": no_of_blocks,
     "no_of_labs": no_of_labs,
-    "senior_groups": senior_groups,
-    "junior_groups": junior_groups,
-    "accelerated_groups": accelerated_groups,
-    "senior_sessions": senior_sessions,
-    "junior_sessions": junior_sessions,
-    "accelerated_sessions": accelerated_sessions,
+    "senior_groups": 0,
+    "junior_groups": 0,
+    "accelerated_groups": 0,
+    "senior_sessions": 0,
+    "junior_sessions": 0,
+    "accelerated_sessions": 0,
     "objective": objective_choice,
     "preference_weights": preference_weights,
     "block_availability": block_availability,
-    "labs_arrangement": labs_arrangement
+    "labs_arrangement": labs_arrangement,
+    "course_data": roster_df.to_dict(orient="records") if roster_df is not None else None,
+    "course_columns": course_columns,
+    "course_sessions": course_sessions,
 }
 
 # Detect if params have changed
@@ -235,16 +381,36 @@ if st.session_state.results is not None:
     markdown_text = results.get("markdown_output", "No schedule returned.")
     
     schedule_data = results.get("weekly_schedule", [])
+
+    def extract_assignment_parts(value):
+        if not value:
+            return None, None, None
+        match = re.match(r"^(.*)-([^\-]+)-Group(\d+)$", str(value))
+        if match:
+            return match.group(1), match.group(2), int(match.group(3))
+        return None, None, None
+
     group_labels = []
+    level_options = set()
     for week in schedule_data:
         for row in week["rows"]:
             for cell in row[1:]:
-                if cell and cell not in group_labels:
+                if not cell:
+                    continue
+                course, level, group_no = extract_assignment_parts(cell)
+                if course is None:
+                    continue
+                if cell not in group_labels:
                     group_labels.append(cell)
+                if level:
+                    level_options.add(level)
 
-    level_options = ["Senior", "Junior", "Accelerated"]
+    level_options = sorted(level_options)
     selected_levels = st.multiselect("Filter by level", options=level_options, default=level_options)
-    filtered_group_labels = sorted([label for label in group_labels if any(label.startswith(level) for level in selected_levels)])
+    filtered_group_labels = sorted([
+        label for label in group_labels
+        if extract_assignment_parts(label)[1] in selected_levels
+    ])
     selected_groups = st.multiselect("Filter by group", options=filtered_group_labels, default=filtered_group_labels)
 
     def apply_group_filter(schedule, allowed_groups):
@@ -265,7 +431,8 @@ if st.session_state.results is not None:
     def format_filtered_markdown(schedule):
         lines = []
         for week in schedule:
-            lines.append(f"## Week {week['week']}")
+            week_label = get_week_label(week["week"] - 1, no_of_days, week_start_date)
+            lines.append(f"## {week_label}")
             lines.append("")
             # Determine column widths for aligned output
             columns = [week["header"]] + [[str(cell) for cell in row] for row in week["rows"]]
@@ -302,7 +469,8 @@ if st.session_state.results is not None:
             current_row = 1
             for week in filtered_schedule_data:
                 # Week title row
-                combined_sheet.cell(row=current_row, column=1, value=f"Week {week['week']}")
+                week_label = get_week_label(week["week"] - 1, no_of_days, week_start_date)
+                combined_sheet.cell(row=current_row, column=1, value=week_label)
                 combined_sheet.cell(row=current_row, column=1).font = openpyxl.styles.Font(bold=True)
                 if len(week["header"]) > 1:
                     combined_sheet.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=len(week["header"]))
@@ -337,7 +505,8 @@ if st.session_state.results is not None:
 
             for week in filtered_schedule_data:
                 df = pd.DataFrame(week["rows"], columns=week["header"])
-                sheet_name = f"Week{week['week']}"
+                week_label = get_week_label(week["week"] - 1, no_of_days, week_start_date)
+                sheet_name = week_label[:31]
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
                 worksheet = writer.sheets[sheet_name]
                 for idx, header in enumerate(week["header"], start=1):
@@ -382,40 +551,90 @@ if st.session_state.results is not None:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-    def render_schedule_html(schedule):
-        html = ["<div style='font-family:Arial, sans-serif;'>"]
+    def parse_cell_assignment(cell_value):
+        if not cell_value:
+            return None
+        match = re.match(r"^(.*)-([^\-]+)-Group(\d+)$", str(cell_value))
+        if not match:
+            return None
+        course_name, level_name, group_number = match.groups()
+        return {
+            "course": course_name,
+            "level": level_name,
+            "group": f"Group{group_number}",
+        }
+
+    def get_students_for_cell(cell_value):
+        if roster_df is None or cell_value in (None, ""):
+            return []
+        assignment = parse_cell_assignment(cell_value)
+        if assignment is None:
+            return []
+
+        course_name = assignment["course"]
+        level_name = assignment["level"]
+        group_name = assignment["group"]
+
+        student_names = []
+        for _, row in roster_df.iterrows():
+            if str(row.get("Student_Level", "")).strip() != level_name:
+                continue
+            if str(row.get("Group", "")).strip() != group_name:
+                continue
+            try:
+                course_flag = row.get(course_name, 0)
+                if int(course_flag) == 1:
+                    student_name = row.get("Student_Name")
+                    if pd.notna(student_name):
+                        student_names.append(str(student_name).strip())
+            except (TypeError, ValueError):
+                continue
+
+        return sorted(set(student_names))
+
+    def build_schedule_grid_html(schedule, colors):
+        if not schedule:
+            return ""
+
+        html_parts = [
+            "<div style='font-family:Arial, sans-serif; overflow-x:auto;'>",
+        ]
+
         for week in schedule:
-            html.append(f"<h3>Week {week['week']}</h3>")
-            html.append("<table style='border-collapse:collapse;width:100%;margin-bottom:1.5rem;'>")
-            html.append("<tr>")
+            week_label = get_week_label(week["week"] - 1, no_of_days, week_start_date)
+            html_parts.append(f"<h3 style='margin:0.8rem 0 0.5rem;'>{week_label}</h3>")
+            html_parts.append("<table style='border-collapse:collapse; width:100%; table-layout:fixed; border:1px solid #ddd; font-size:12px; margin-bottom:1rem;'>")
+            html_parts.append("<tr>")
             for header in week["header"]:
-                html.append(
-                    f"<th style='border:1px solid #ddd;padding:8px;background:#f2f2f2;text-align:left;color:#333;'>{header}</th>"
+                html_parts.append(
+                    f"<th style='border:1px solid #ddd; background:#f4f4f4; color:#333; padding:8px; text-align:center; min-width:90px;'>{header}</th>"
                 )
-            html.append("</tr>")
+            html_parts.append("</tr>")
+
             for row in week["rows"]:
-                html.append("<tr>")
-                html.append(
-                    f"<td style='border:1px solid #ddd;padding:8px;background:#ffffff;color:#111;font-weight:bold;'>{row[0]}</td>"
-                )
+                html_parts.append("<tr>")
+                html_parts.append(f"<th style='border:1px solid #ddd; background:#fafafa; color:#111; padding:8px; text-align:left;'>{row[0]}</th>")
                 for cell in row[1:]:
                     if cell:
-                        color = group_colors.get(cell, "#555555")
-                        html.append(
-                            f"<td style='border:1px solid #ddd;padding:8px;background:{color};color:#ffffff;text-align:center;font-weight:bold;'>{cell}</td>"
+                        color = colors.get(cell, "#64748b")
+                        html_parts.append(
+                            f"<td style='border:1px solid #ddd; background:{color}; color:#fff; padding:8px; text-align:center; font-weight:bold; vertical-align:middle; min-height:52px; white-space:normal;'>{cell}</td>"
                         )
                     else:
-                        html.append(
-                            "<td style='border:1px solid #ddd;padding:8px;background:#ffffff;color:#ffffff;text-align:center;'></td>"
-                        )
-                html.append("</tr>")
-            html.append("</table>")
-        html.append("</div>")
-        return "".join(html)
+                        html_parts.append("<td style='border:1px solid #ddd; background:#ffffff; padding:8px; text-align:center; min-height:52px;'></td>")
+                html_parts.append("</tr>")
+            html_parts.append("</table>")
 
-    styled_schedule_html = render_schedule_html(filtered_schedule_data) if filtered_schedule_data else ""
-    if styled_schedule_html:
-        st.markdown(styled_schedule_html, unsafe_allow_html=True)
+        html_parts.append("</div>")
+        return "".join(html_parts)
+
+    st.caption("Weekly schedule view.")
+
+    if filtered_schedule_data:
+        st.markdown(
+            build_schedule_grid_html(filtered_schedule_data, group_colors),
+            unsafe_allow_html=True,
+        )
     else:
         st.markdown(filtered_markdown_text)
 

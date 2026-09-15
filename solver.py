@@ -1,34 +1,27 @@
 from ortools.sat.python import cp_model
 
-# ============================================================
-# Default Patterns for Block Availability and Labs Arrangement
-# ============================================================
+
 def get_default_block_availability():
-    """
-    Default block availability pattern for each level across days.
-    Days: Mon, Tue, Wed, Thu, Fri, Sat
-    """
+    """Default availability by level for a six-day week."""
     return [
-        [1, 0, 1, 0, 0, 1],  # Senior availability
-        [0, 1, 1, 1, 0, 1],  # Junior availability
-        [0, 1, 0, 1, 1, 1]   # Accelerated availability
+        [1, 0, 1, 0, 0, 1],
+        [0, 1, 1, 1, 0, 1],
+        [0, 1, 0, 1, 1, 1],
     ]
 
+
 def get_default_labs_arrangement(no_of_blocks, no_of_labs, no_of_days):
-    """
-    Default lab arrangement pattern for each day and block.
-    Returns: List of days, each containing list of blocks, each containing list of labs.
-    """
+    """Default lab layout with support for up to 7 days."""
     days_arrangement = [
-        [[0, 1], [0, 0]],  # Monday
-        [[1, 1], [1, 1]],  # Tuesday
-        [[1, 1], [1, 1]],  # Wednesday
-        [[0, 0], [1, 0]],  # Thursday
-        [[1, 1], [1, 1]],  # Friday
-        [[1, 1], [1, 1]],  # Saturday
-        [[1, 1], [1, 1]]   # Sunday
+        [[0, 1], [0, 0]],
+        [[1, 1], [1, 1]],
+        [[1, 1], [1, 1]],
+        [[0, 0], [1, 0]],
+        [[1, 1], [1, 1]],
+        [[1, 1], [1, 1]],
+        [[1, 1], [1, 1]],
     ]
-    
+
     adapted_arrangement = []
     for day_idx in range(no_of_days):
         day = days_arrangement[day_idx] if day_idx < len(days_arrangement) else days_arrangement[-1]
@@ -40,60 +33,109 @@ def get_default_labs_arrangement(no_of_blocks, no_of_labs, no_of_days):
                 block_labs = [1] * no_of_labs
             day_blocks.append(block_labs)
         adapted_arrangement.append(day_blocks)
-    
     return adapted_arrangement
 
-def run_ortools_solver(params):
 
-  
-    # parameters
+def _normalize_bool(value):
+    if value is None:
+        return False
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return normalized in {"1", "true", "yes", "y", "on"}
+    if isinstance(value, (int, float)):
+        return bool(int(value))
+    return bool(value)
+
+
+def _sort_key(value):
+    text = str(value).strip()
+    if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+        return (0, int(text))
+    return (1, text.lower())
+
+
+def _build_roster_from_csv(params):
+    course_data = params.get("course_data") or []
+    course_columns = params.get("course_columns") or []
+    if not course_data or not course_columns:
+        return None
+
+    course_sessions = params.get("course_sessions") or [1] * len(course_columns)
+    course_sessions = list(course_sessions[: len(course_columns)]) + [1] * max(0, len(course_columns) - len(course_sessions))
+
+    level_sets = {}
+    for row in course_data:
+        level_value = None
+        for candidate in ["Student_Level", "Level", "student_level", "level"]:
+            if candidate in row and row[candidate] not in (None, ""):
+                level_value = str(row[candidate]).strip()
+                break
+        if level_value is None:
+            level_value = "0"
+
+        group_value = None
+        for candidate in ["Group_Index", "Group", "group_index", "group"]:
+            if candidate in row and row[candidate] not in (None, ""):
+                group_value = str(row[candidate]).strip()
+                break
+        if group_value is None:
+            group_value = "1"
+
+        level_sets.setdefault(level_value, set()).add(group_value)
+
+    level_text = sorted(level_sets.keys(), key=_sort_key)
+    group_counts = []
+    student_data = []
+    for level_name in level_text:
+        groups = sorted(level_sets[level_name], key=_sort_key)
+        group_counts.append(len(groups))
+        level_rows = []
+        for group_name in groups:
+            enrolled = [0] * len(course_columns)
+            for row in course_data:
+                row_level = None
+                for candidate in ["Student_Level", "Level", "student_level", "level"]:
+                    if candidate in row and row[candidate] not in (None, ""):
+                        row_level = str(row[candidate]).strip()
+                        break
+                if row_level is None:
+                    row_level = "0"
+
+                row_group = None
+                for candidate in ["Group_Index", "Group", "group_index", "group"]:
+                    if candidate in row and row[candidate] not in (None, ""):
+                        row_group = str(row[candidate]).strip()
+                        break
+                if row_group is None:
+                    row_group = "1"
+
+                if row_level != level_name or row_group != group_name:
+                    continue
+
+                for idx, course in enumerate(course_columns):
+                    if course in row and _normalize_bool(row[course]):
+                        enrolled[idx] = 1
+            level_rows.append(enrolled)
+        student_data.append(level_rows)
+
+    return {
+        "courses": course_columns,
+        "course_sessions": [int(v) for v in course_sessions],
+        "level_text": level_text,
+        "no_of_groups_levelwise": group_counts,
+        "student_data": student_data,
+    }
+
+
+def _solve_course_aware_model(params):
+    roster = _build_roster_from_csv(params)
+    if roster is None:
+        raise ValueError("Course roster data is missing or incomplete.")
+
     no_of_weeks = params["no_of_weeks"]
     no_of_days = params["no_of_days"]
     no_of_blocks = params["no_of_blocks"]
     no_of_labs = params["no_of_labs"]
-
-    no_of_groups_levelwise = [
-        params["senior_groups"],
-        params["junior_groups"],
-        params["accelerated_groups"]
-    ]
-
-    no_of_lab_sessions_levelwise = [
-        params["senior_sessions"],
-        params["junior_sessions"],
-        params["accelerated_sessions"]
-    ]
-
-    level_text = ["Senior", "Junior", "Accelerated"]
-    no_of_level = len(no_of_groups_levelwise)
-
-    daily_header_data = [[
-        [
-            f"Block{block+1}-Lab{lab+1}"
-            for block in range(no_of_blocks)
-            for lab in range(no_of_labs)
-        ]
-    ]]
-
-    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-
-    # ------------------------------------------------------------
-    # Fixed arrays (actual data from nursing school)- commented out for now, replaced with user input
-    # ------------------------------------------------------------
-    # block_availability = [
-    #     [1, 0, 1, 0, 0, 1],  # senior
-    #     [0, 1, 1, 1, 0, 1],  # junior
-    #     [0, 1, 0, 1, 1, 1]   # accelerated
-    # ]
-
-    # labs_arrangement = [
-    #     [[0, 1], [0, 0]],  # Monday
-    #     [[1, 1], [1, 1]],  # Tuesday
-    #     [[1, 1], [1, 1]],  # Wednesday
-    #     [[0, 0], [1, 0]],  # Thursday
-    #     [[1, 1], [1, 1]],  # Friday
-    #     [[1, 1], [1, 1]]   # Saturday
-    # ]
 
     block_availability = params["block_availability"]
     labs_arrangement = params["labs_arrangement"]
@@ -107,163 +149,173 @@ def run_ortools_solver(params):
     else:
         preference_list = [1] * no_of_weeks
 
-    # ------------------------------------------------------------
-    # Build Model
-    # ------------------------------------------------------------
-    model = cp_model.CpModel()
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][:no_of_days]
+    courses = roster["courses"]
+    course_sessions = roster["course_sessions"]
+    level_text = roster["level_text"]
+    no_of_level = len(level_text)
+    student_data = roster["student_data"]
+    no_of_groups_levelwise = roster["no_of_groups_levelwise"]
 
+    model = cp_model.CpModel()
     assign = {}
 
     for level in range(no_of_level):
         for group in range(no_of_groups_levelwise[level]):
-            for week in range(no_of_weeks):
-                for day in range(no_of_days):
-                    for block in range(no_of_blocks):
-                        for lab in range(no_of_labs):
-                            assign[(level, group, week, day, block, lab)] = \
-                                model.NewBoolVar(f"L{level}_G{group}_W{week}_D{day}_B{block}_L{lab}")
+            for course in range(len(courses)):
+                if student_data[level][group][course] != 1:
+                    continue
+                for week in range(no_of_weeks):
+                    for day in range(no_of_days):
+                        for block in range(no_of_blocks):
+                            for lab in range(no_of_labs):
+                                key = (level, group, course, week, day, block, lab)
+                                assign[key] = model.NewBoolVar(
+                                    f"X_L{level}_G{group}_C{course}_W{week}_D{day}_B{block}_Lab{lab}"
+                                )
 
-    # ------------------------------------------------------------
-    # Constraint 1 & 2: Required sessions + allowed days
-    # ------------------------------------------------------------
     for level in range(no_of_level):
         for group in range(no_of_groups_levelwise[level]):
-            total_sessions = []
-            forbidden_sessions = []
+            for course in range(len(courses)):
+                if student_data[level][group][course] != 1:
+                    continue
+                session_vars = []
+                for week in range(no_of_weeks):
+                    for day in range(no_of_days):
+                        for block in range(no_of_blocks):
+                            for lab in range(no_of_labs):
+                                key = (level, group, course, week, day, block, lab)
+                                if key in assign:
+                                    session_vars.append(assign[key])
+                model.Add(sum(session_vars) == course_sessions[course])
 
-            for week in range(no_of_weeks):
-                for day in range(no_of_days):
-                    for block in range(no_of_blocks):
-                        for lab in range(no_of_labs):
-                            var = assign[(level, group, week, day, block, lab)]
-                            total_sessions.append(var)
-                            forbidden_sessions.append(var * (not block_availability[level][day]))
-
-            model.Add(sum(total_sessions) == no_of_lab_sessions_levelwise[level])
-            model.Add(sum(forbidden_sessions) == 0)
-
-    # ------------------------------------------------------------
-    # Constraint 3: At most one lab per day per group
-    # ------------------------------------------------------------
     for level in range(no_of_level):
         for group in range(no_of_groups_levelwise[level]):
             for week in range(no_of_weeks):
                 for day in range(no_of_days):
-                    daily_vars = [
-                        assign[(level, group, week, day, block, lab)]
-                        for block in range(no_of_blocks)
-                        for lab in range(no_of_labs)
-                    ]
-                    model.Add(sum(daily_vars) <= 1)
+                    daily_vars = []
+                    for course in range(len(courses)):
+                        for block in range(no_of_blocks):
+                            for lab in range(no_of_labs):
+                                key = (level, group, course, week, day, block, lab)
+                                if key in assign:
+                                    daily_vars.append(assign[key])
+                    if daily_vars:
+                        model.Add(sum(daily_vars) <= 1)
 
-    # ------------------------------------------------------------
-    # Constraint 4: Lab schedule availability
-    # ------------------------------------------------------------
-    for week in range(no_of_weeks):
-        for day in range(no_of_days):
-            forbidden = []
-            for level in range(no_of_level):
-                for group in range(no_of_groups_levelwise[level]):
-                    for block in range(no_of_blocks):
-                        for lab in range(no_of_labs):
-                            forbidden.append(
-                                assign[(level, group, week, day, block, lab)]
-                                * (not labs_arrangement[day][block][lab])
-                            )
-            model.Add(sum(forbidden) == 0)
+    for level in range(no_of_level):
+        for group in range(no_of_groups_levelwise[level]):
+            for course in range(len(courses)):
+                if student_data[level][group][course] != 1:
+                    continue
+                for week in range(no_of_weeks):
+                    for day in range(no_of_days):
+                        for block in range(no_of_blocks):
+                            for lab in range(no_of_labs):
+                                key = (level, group, course, week, day, block, lab)
+                                if key in assign:
+                                    if block_availability[level][day] == 0:
+                                        model.Add(assign[key] == 0)
+                                    if labs_arrangement[day][block][lab] == 0:
+                                        model.Add(assign[key] == 0)
 
-    # ------------------------------------------------------------
-    # Constraint 5: Only one group per lab per block
-    # ------------------------------------------------------------
     for week in range(no_of_weeks):
         for day in range(no_of_days):
             for block in range(no_of_blocks):
                 for lab in range(no_of_labs):
-                    occupancy = [
-                        assign[(level, group, week, day, block, lab)]
-                        for level in range(no_of_level)
-                        for group in range(no_of_groups_levelwise[level])
-                    ]
-                    model.Add(sum(occupancy) <= 1)
+                    course_slot_vars = []
+                    for level in range(no_of_level):
+                        for group in range(no_of_groups_levelwise[level]):
+                            for course in range(len(courses)):
+                                key = (level, group, course, week, day, block, lab)
+                                if key in assign:
+                                    course_slot_vars.append(assign[key])
+                    if course_slot_vars:
+                        model.Add(sum(course_slot_vars) <= 1)
 
-    # ------------------------------------------------------------
-    # Objective
-    # ------------------------------------------------------------
-    z_min = []
     for level in range(no_of_level):
         for group in range(no_of_groups_levelwise[level]):
             for week in range(no_of_weeks):
                 for day in range(no_of_days):
                     for block in range(no_of_blocks):
                         for lab in range(no_of_labs):
-                            var = assign[(level, group, week, day, block, lab)]
-                            if objective_choice == "Preference Weighted Scheduling":
-                                z_min.append(var * preference_list[week])
-                            else:
-                                z_min.append(var * block)
+                            group_slot_vars = []
+                            for course in range(len(courses)):
+                                key = (level, group, course, week, day, block, lab)
+                                if key in assign:
+                                    group_slot_vars.append(assign[key])
+                            if group_slot_vars:
+                                model.Add(sum(group_slot_vars) <= 1)
 
-    model.Minimize(sum(z_min))
+    objective_terms = []
+    for level in range(no_of_level):
+        for group in range(no_of_groups_levelwise[level]):
+            for course in range(len(courses)):
+                if student_data[level][group][course] != 1:
+                    continue
+                for week in range(no_of_weeks):
+                    for day in range(no_of_days):
+                        for block in range(no_of_blocks):
+                            for lab in range(no_of_labs):
+                                key = (level, group, course, week, day, block, lab)
+                                if key in assign:
+                                    weight = preference_list[week] if objective_choice == "Preference Weighted Scheduling" else 1
+                                    objective_terms.append(assign[key] * weight)
 
-    # ------------------------------------------------------------
-    # Solve
-    # ------------------------------------------------------------
+    model.Maximize(sum(objective_terms))
+
     solver = cp_model.CpSolver()
     status = solver.solve(model)
 
-    # ------------------------------------------------------------
-    # Build Markdown and structured schedule output
-    # ------------------------------------------------------------
     markdown_output = ""
     weekly_schedule = []
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-
         for week in range(no_of_weeks):
-
-            markdown_output += f"\n### Week: {week+1}\n"
-
-            header_cells = ["Days"] + daily_header_data[0][0]
-            markdown_output += "| " + " | ".join(f"{cell:<21}" for cell in header_cells) + " |\n"
-            separator_cells = ["-" * 23] + ["-" * 21] * (len(header_cells) - 1)
-            markdown_output += "|" + "|".join(separator_cells) + "|\n"
+            header_cells = ["Days"] + [f"Block{block + 1}-Lab{lab + 1}" for block in range(no_of_blocks) for lab in range(no_of_labs)]
+            markdown_output += f"\n### Week: {week + 1}\n"
+            markdown_output += "| " + " | ".join(f"{cell:<22}" for cell in header_cells) + " |\n"
+            markdown_output += "|" + "|".join(["-" * 24] + ["-" * 22] * (len(header_cells) - 1)) + "|\n"
 
             week_rows = []
             for day in range(no_of_days):
-
                 row = [days[day]]
-                markdown_row = f"| {days[day]:<21} |"
-
                 for block in range(no_of_blocks):
                     for lab in range(no_of_labs):
-
                         assigned_text = ""
-
                         for level in range(no_of_level):
                             for group in range(no_of_groups_levelwise[level]):
-                                if solver.value(assign[(level, group, week, day, block, lab)]) == 1:
-                                    assigned_text = f"{level_text[level]}-Group{group+1}"
-
+                                for course in range(len(courses)):
+                                    key = (level, group, course, week, day, block, lab)
+                                    if key in assign and solver.Value(assign[key]) == 1:
+                                        assigned_text = f"{courses[course]}-{level_text[level]}-Group{group + 1}"
+                                        break
+                                if assigned_text:
+                                    break
+                            if assigned_text:
+                                break
                         row.append(assigned_text)
-                        markdown_row += f"{assigned_text:<21} |"
-
                 week_rows.append(row)
-                markdown_output += markdown_row + "\n"
+                markdown_output += "| " + " | ".join(f"{cell:<22}" for cell in row) + " |\n"
 
             weekly_schedule.append({
                 "week": week + 1,
                 "header": header_cells,
-                "rows": week_rows
+                "rows": week_rows,
             })
-
     else:
         markdown_output = "No Solution Found"
 
-    # ------------------------------------------------------------
-    # Return results
-    # ------------------------------------------------------------
     return {
-        "status": solver.status_name(status),
-        "objective_value": solver.objective_value if status in (cp_model.OPTIMAL, cp_model.FEASIBLE) else None,
+        "status": solver.StatusName(status),
+        "objective_value": solver.ObjectiveValue() if status in (cp_model.OPTIMAL, cp_model.FEASIBLE) else None,
         "markdown_output": markdown_output,
         "weekly_schedule": weekly_schedule,
-        "daily_header_data": daily_header_data
+        "daily_header_data": [header_cells],
     }
+
+
+def run_ortools_solver(params):
+    if not params.get("course_data") or not params.get("course_columns"):
+        raise ValueError("CSV roster data is required. Upload a roster CSV containing level, group, course, and student enrollment information.")
+
+    return _solve_course_aware_model(params)
