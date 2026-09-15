@@ -283,14 +283,16 @@ if roster_df is not None:
             disabled=False,
         )
 
+        default_session_pattern = [3, 2, 1, 3, 2, 1]
         course_sessions = []
-        for course in course_columns:
+        for index, course in enumerate(course_columns):
+            default_value = default_session_pattern[index % len(default_session_pattern)]
             course_sessions.append(
                 st.sidebar.number_input(
                     f"{course} session count",
                     min_value=1,
                     max_value=20,
-                    value=1,
+                    value=default_value,
                     key=f"course_session_{course}"
                 )
             )
