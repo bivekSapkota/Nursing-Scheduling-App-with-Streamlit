@@ -1,6 +1,7 @@
 import json
 import re
 import uuid
+import base64
 from datetime import date, timedelta
 from html import escape
 from pathlib import Path
@@ -112,6 +113,32 @@ st.title(" Nursing Simulation Lab Scheduling Optimization")
 
 st.markdown("Copyright © 2023 Nursing Simulation Lab Scheduling Optimization App. All rights reserved.")
 st.markdown("Contributors: Dr. Leonardo Bedoya- Valencia, Dr. Ebisa Wollega, Aminoritse Bajah-Onyejekwe, Bivek Sapkota")
+
+
+def load_user_guide_html():
+    """Inline the guide's local screenshots as base64 so they render inside the iframe."""
+    guide_path = Path(__file__).resolve().parent / "User Guide.html"
+    if not guide_path.exists():
+        return None
+    html_text = guide_path.read_text(encoding="utf-8")
+
+    def embed_image(match):
+        relative_src = match.group(1)
+        image_path = guide_path.parent / relative_src
+        if not image_path.exists():
+            return match.group(0)
+        encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+        return match.group(0).replace(f'src="{relative_src}"', f'src="data:image/png;base64,{encoded}"')
+
+    return re.sub(r'src="(screenshots/[^"]+)"', embed_image, html_text)
+
+
+with st.expander("📖 User Guide — How to Use This App", expanded=False):
+    guide_html = load_user_guide_html()
+    if guide_html:
+        components.html(guide_html, height=900, scrolling=True)
+    else:
+        st.warning("User Guide.html not found next to app.py.")
 
 # Sidebar Inputs
 st.sidebar.header("Model Parameters")
