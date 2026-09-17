@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Nursing Simulation Lab Scheduling — User Guide</title>
+<style>
+  :root {
+    --accent: #ff8c00;
+    --accent-dark: #e67e00;
+    --green: #28a745;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --bg-soft: #f9fafb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, Segoe UI, Arial, sans-serif;
+    color: var(--text);
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 32px 20px 80px;
+    line-height: 1.6;
+    background: #ffffff;
+  }
+  h1 { font-size: 1.9rem; margin-bottom: 0.2rem; }
+  h2 {
+    font-size: 1.35rem;
+    margin-top: 2.4rem;
+    padding-bottom: 6px;
+    border-bottom: 3px solid var(--accent);
+  }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; color: var(--text); }
+  .subtitle { color: var(--muted); margin-top: 0; }
+  .toc {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin: 20px 0 32px;
+  }
+  .toc ul { margin: 0; padding-left: 20px; columns: 2; }
+  .toc a { color: #1d4ed8; text-decoration: none; font-size: 0.95rem; }
+  .toc a:hover { text-decoration: underline; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0 20px; font-size: 0.92rem; }
+  th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--bg-soft); }
+  code, .mono {
+    font-family: Consolas, Menlo, monospace;
+    background: #f1f5f9;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+  .callout {
+    border-left: 4px solid var(--accent);
+    background: #fff7ec;
+    padding: 10px 16px;
+    border-radius: 6px;
+    margin: 16px 0;
+  }
+  .callout.tip { border-left-color: var(--green); background: #eefdf1; }
+  .callout.warn { border-left-color: #dc2626; background: #fef2f2; }
+  .screenshot {
+    border: 2px dashed #cbd5e1;
+    border-radius: 10px;
+    background: #f8fafc;
+    color: var(--muted);
+    text-align: center;
+    padding: 48px 16px;
+    margin: 14px 0 22px;
+    font-size: 0.92rem;
+  }
+  .screenshot strong { display: block; margin-bottom: 4px; color: var(--text); }
+  .screenshot img { max-width: 100%; border-radius: 8px; }
+  ol, ul { padding-left: 22px; }
+  .step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px; height: 22px;
+    background: var(--accent);
+    color: white;
+    border-radius: 50%;
+    font-size: 0.8rem;
+    margin-right: 6px;
+  }
+  footer {
+    margin-top: 60px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  .badge {
+    display: inline-block;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-right: 6px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Nursing Simulation Lab Scheduling — User Guide</h1>
+<p class="subtitle">How the scheduling model works and how to run it, step by step.</p>
+
+<div class="toc">
+  <ul>
+    <li><a href="#overview">1. Overview</a></li>
+    <li><a href="#how-it-works">2. How the Model Works</a></li>
+    <li><a href="#objective">3. Objective</a></li>
+    <li><a href="#constraints">4. Constraints</a></li>
+    <li><a href="#data">5. Required Data (Roster CSV)</a></li>
+    <li><a href="#running">6. Running a Schedule</a></li>
+    <li><a href="#reading">7. Reading &amp; Exporting Results</a></li>
+    <li><a href="#troubleshooting">8. Troubleshooting</a></li>
+  </ul>
+</div>
+
+<h2 id="overview">1. Overview</h2>
+<p>
+This app builds a weekly lab schedule for nursing students automatically. You upload a roster
+(who is taking which course, at what level and in what group), set a few scheduling parameters
+(weeks, days, blocks, labs), and the app uses a mathematical solver
+to assign every course session to a day/block/lab slot without conflicts.
+</p>
+
+<div class="screenshot">
+  <img src="screenshots/Full Screen.png" alt="Full app screen showing the sidebar and the main Run Optimization Solver area">
+</div>
+
+<h2 id="how-it-works">2. How the Model Works</h2>
+<p>
+The scheduler is a <strong>constraint optimization model</strong>, not a simple lookup table. It works in three phases:
+</p>
+<ol>
+  <li><strong>Build the roster:</strong> the uploaded CSV is grouped by <em>Level</em> (Senior / Junior / Accelerated) and <em>Group</em> (e.g. Group1, Group2). For each group, the app determines which courses its students need and how many lab sessions each course requires.</li>
+  <li><strong>Create the decision variables:</strong> for every possible combination of (level, group, course, week, day, block, lab), the solver creates a yes/no variable — "is this course session for this group scheduled in this exact slot?"</li>
+  <li><strong>Solve:</strong> the CP-SAT solver searches for an assignment of all these yes/no variables that satisfies every constraint (see below) while minimizing the chosen objective. It returns the first optimal/feasible solution found, or reports that no solution exists.</li>
+</ol>
+
+<div class="callout">
+Every group/course/week combination is scheduled into exactly one <strong>Day → Block → Lab</strong> slot.
+A "slot" is the smallest unit of time in the model, e.g. <em>Monday, Block 1, Lab 2</em>.
+</div>
+
+<h2 id="objective">3. Objective</h2>
+<p>You choose the solver's goal on the main screen before running:</p>
+<table>
+  <tr><th>Objective</th><th>What it does</th></tr>
+  <tr>
+    <td><strong>Balanced Schedule Distribution</strong></td>
+    <td>Minimizes total usage of later blocks in the day, which naturally spreads sessions across the earliest available blocks first, keeping the schedule compact and evenly distributed.</td>
+  </tr>
+  <tr>
+    <td><strong>Preference Weighted Scheduling</strong></td>
+    <td>You assign a weight to each week (higher number = less preferred). The solver minimizes total weight used, pushing sessions toward the weeks you marked as more preferable.</td>
+  </tr>
+</table>
+
+<h2 id="constraints">4. Constraints</h2>
+<p>These rules are always enforced — the solver will never violate them:</p>
+<table>
+  <tr><th>Constraint</th><th>Plain-English meaning</th></tr>
+  <tr><td>Required session count</td><td>Each group must receive exactly the number of lab sessions configured for every course it is enrolled in (e.g. a 3-session course gets scheduled 3 separate times).</td></tr>
+  <tr><td>One course per group per day</td><td>A group cannot attend two different course sessions on the same day.</td></tr>
+  <tr><td>Allowed days (Block Availability)</td><td>Each level (Senior/Junior/Accelerated) can only be scheduled on the days you marked as available for that level.</td></tr>
+  <tr><td>Lab availability (Labs Arrangement)</td><td>A session can only be placed in a day/block/lab slot that you marked as "running" (open) that week.</td></tr>
+  <tr><td>One course per slot</td><td>Two different groups cannot use the same lab at the same day/block/lab slot.</td></tr>
+  <tr><td>One session per group per slot</td><td>A single group cannot be in two places (two courses) in the same slot.</td></tr>
+</table>
+<div class="callout warn">
+If constraints conflict — e.g. too few available days/labs for the number of required sessions — the
+solver reports <strong>"No Solution Found"</strong> (INFEASIBLE). Loosen availability or reduce
+session counts and try again.
+</div>
+
+<h2 id="data">5. Required Data (Roster CSV)</h2>
+<p>The app needs one CSV file describing your students, their level/group, and which courses they take.</p>
+<h3>Required columns</h3>
+<table>
+  <tr><th>Column</th><th>Description</th></tr>
+  <tr><td><code>Student_Name</code></td><td>Student's name or ID (used only for the student list shown when you click a scheduled course).</td></tr>
+  <tr><td><code>Student_Level</code></td><td>One of <code>Senior</code>, <code>Junior</code>, or <code>Accelerated</code>.</td></tr>
+  <tr><td><code>Group</code></td><td>The lab group the student belongs to within their level, e.g. <code>Group1</code>, <code>Group2</code>.</td></tr>
+  <tr><td>One column per course</td><td>e.g. <code>412L</code>, <code>422L</code>, <code>312L</code>. Use <code>1</code> if the student is enrolled in that course, <code>0</code> otherwise.</td></tr>
+</table>
+<h3>Example row</h3>
+<pre class="mono" style="background:#f1f5f9;padding:12px;border-radius:8px;overflow-x:auto;">Student_Name,Student_Level,Group,412L,422L,442L,312L,322L,382L
+Laati,Senior,Group1,1,0,1,0,0,0</pre>
+
+<div class="callout tip">
+Don't have a roster ready? Use the <strong>Sample CSV Generator</strong> in the sidebar to create and
+download a realistic test roster with a chosen number of groups and students per group.
+</div>
+
+<h3>Other inputs you configure (sidebar &amp; main screen)</h3>
+<table>
+  <tr><th>Input</th><th>Purpose</th></tr>
+  <tr><td>Week starts from</td><td>Calendar date the first week begins — used only to label weeks in the output.</td></tr>
+  <tr><td>Number of Weeks</td><td>How many weeks the schedule should cover.</td></tr>
+  <tr><td>Number of Days per Week</td><td>1–7 scheduling days per week.</td></tr>
+  <tr><td>Blocks per Day / Labs per Block</td><td>How many time blocks exist per day, and how many parallel labs exist per block.</td></tr>
+  <tr><td>Expected Course Requirements</td><td>Editable matrix confirming which level should take which course.</td></tr>
+  <tr><td>Course session count</td><td>How many separate lab sessions each course requires per group.</td></tr>
+  <tr><td>Block Availability</td><td>Checkbox grid — which days each level (Senior/Junior/Accelerated) is allowed to attend lab.</td></tr>
+  <tr><td>Labs Arrangement</td><td>Checkbox grid — which labs are actually open/running in each day/block.</td></tr>
+  <tr><td>Objective + Weekly Preference Weights</td><td>See <a href="#objective">Objective</a> section above.</td></tr>
+</table>
+
+<h2 id="running">6. Running a Schedule</h2>
+<ol>
+  <li><span class="step-num">1</span> Upload your roster CSV in the sidebar, or generate a sample roster.</li>
+  <li><span class="step-num">2</span> Set <em>Number of Weeks</em>, <em>Days per Week</em>, <em>Blocks per Day</em>, and <em>Labs per Block</em>.</li>
+  <li><span class="step-num">3</span> Review/edit the auto-detected <em>Expected Course Requirements</em> and each course's session count.</li>
+  <li><span class="step-num">4</span> Set <em>Block Availability</em> (allowed days per level) and <em>Labs Arrangement</em> (which labs run when).</li>
+  <li><span class="step-num">5</span> Choose an <em>Objective</em> on the main screen (and weekly preferences, if applicable).</li>
+  <li><span class="step-num">6</span> Click <strong>Run Solver</strong>.</li>
+</ol>
+
+<div class="screenshot">
+  <img src="screenshots/sidebar1.png" width="35.5%" alt="Sidebar showing roster upload, weeks/days/blocks/labs inputs, and the Block Availability checkboxes.">
+  <span style="display:inline-block; width:50px;"></span>
+  <img src="screenshots/sidebar2.png" alt="Sidebar showing roster upload, weeks/days/blocks/labs inputs, and the Block Availability checkboxes.">
+
+</div>
+
+<div class="screenshot">
+  <img src="screenshots/objective.png" alt="Objective Selection panel and the orange 'Run Solver' button.">
+</div>
+
+<h2 id="reading">7. Reading &amp; Exporting Results</h2>
+<p>Once the solver finishes, you'll see:</p>
+<ul>
+  <li><strong>Solver Status</strong> — <code>OPTIMAL</code>/<code>FEASIBLE</code> means a valid schedule was found; <code>INFEASIBLE</code> means no valid schedule exists with the current settings.</li>
+  <li><strong>Weekly Schedule table</strong> — one table per week, rows are days, columns are Block/Lab slots, and each filled cell shows <code>Course-Level-Group</code>. Click a cell to see the list of students in that session.</li>
+  <li><strong>Filters</strong> — filter the view by level or group.</li>
+  <li><strong>Downloads</strong> — export the schedule as a formatted text/markdown file or as a color-coded Excel workbook (one sheet per week plus a combined "All Weeks" sheet).</li>
+</ul>
+
+<div class="screenshot">
+  <img src="screenshots/Filter-Schedule.png" alt="Weekly Schedule table with colored course cells">
+  <p>Weekly schedule table with colored course cells</p>
+</div>
+
+<div class="screenshot">
+  <img src="screenshots/Student List.png" alt="student list">
+  <p>Tabbed list of students for the selected course session.</p>
+</div>
+
+<h2 id="troubleshooting">8. Troubleshooting</h2>
+<table>
+  <tr><th>Symptom</th><th>Likely Cause / Fix</th></tr>
+  <tr><td>"No Solution Found"</td><td>Too many required sessions for the available days/labs. Add more allowed days, open more labs, or reduce session counts.</td></tr>
+  <tr><td>Course columns not detected</td><td>Make sure the CSV header row includes <code>Student_Name</code>, <code>Student_Level</code>, <code>Group</code>, and one column per course with 0/1 values.</td></tr>
+  <tr><td>Schedule looks unchanged after edits</td><td>A yellow warning banner appears when inputs changed — click <strong>Run Solver</strong> again to refresh results.</td></tr>
+  <tr><td>Wrong students appear under a course</td><td>Check the <em>Expected Course Requirements</em> matrix and the course 0/1 values in your roster CSV.</td></tr>
+</table>
+
+<footer>
+  Nursing Simulation Lab Scheduling Optimization App — Contributors: Dr. Leonardo Bedoya-Valencia, Dr. Ebisa Wollega, Aminoritse Bajah-Onyejekwe, Bivek Sapkota.
+</footer>
+
+</body>
+</html>
